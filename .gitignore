@@ -8,3 +8,4 @@ ddo/
 .venv/
 __pycache__/
 .DS_Store
+outputs/
