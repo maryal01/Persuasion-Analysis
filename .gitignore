@@ -1,0 +1,10 @@
+practice/
+*.jsonl
+cmv_delta_dataset/
+cmv_delta_model/
+cmv/
+ddo/
+.ipynb_checkpoints/
+.venv/
+__pycache__/
+.DS_Store
