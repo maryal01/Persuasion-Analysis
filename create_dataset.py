@@ -50,21 +50,20 @@ def build_cmv(path):
     """T1. Webis-CMV-20 pairs.jsonl -> {original, reply, label, pair_id, post_id}, two rows per pair.
 
     Pairs are split by post, so a post's pairs never straddle train and test; score a pair by
-    whether its delta row outscores its no-delta row. The reply keeps only the persuader's own
-    comments: some no-delta branches also contain OP replies, which would give the label away.
+    whether its delta row outscores its no-delta row. Pairs whose reply was written by the OP
+    (21 no-delta branches) are dropped, since OPs don't award themselves deltas.
     """
     rows = []
     with open(path) as fh:
         for pair_id, line in enumerate(fh):
             r = json.loads(line)
             s = r["submission"]
+            if s.get("author") in (r["delta_comment"]["author"], r["nodelta_comment"]["author"]):
+                continue
             original = (s.get("title", "") + "\n\n" + s.get("selftext", "")).strip()
             split = split_of(r["submission_id"])
             for key, label in (("delta_comment", 1), ("nodelta_comment", 0)):
-                branch = r[key]
-                reply = "\n\n".join(
-                    c.get("body", "") for c in branch["comments"] if c.get("author") == branch["author"]
-                ).strip()
+                reply = "\n\n".join(c.get("body", "") for c in r[key]["comments"]).strip()
                 rows.append({"original": original, "reply": reply, "label": label,
                              "pair_id": pair_id, "post_id": r["submission_id"], "split": split})
     return {"cmv": to_splits(rows, ["nodelta", "delta"])}
