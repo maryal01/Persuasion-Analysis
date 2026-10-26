@@ -45,6 +45,9 @@ python create_dataset.py --dry-run
 python create_dataset.py
 ```
 
+Pushes go to the `t1-t2` branch of the dataset repo, which is created on first
+push, so the shared `main` branch is left alone. Pass `--revision main` to publish there.
+
 ## 2. Fine-tune & publish the model — `train_delta.py`
 ```bash
 # train on a config, save model locally
@@ -56,6 +59,9 @@ python train_delta.py --dataset-config ddo_switch --push
 # fast end-to-end pipeline check
 python train_delta.py --smoke
 ```
+
+Data is loaded from the `t1-t2` branch by default; `--dataset-revision main`
+loads the shared branch instead.
 
 The loss is class-weighted (inverse frequency), and the best checkpoint is chosen
 by F1 of the positive class (binary configs) or macro-F1 (`ddo_undecided`). Test

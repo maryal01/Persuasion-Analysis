@@ -9,6 +9,7 @@ from datasets import ClassLabel, Dataset, DatasetDict
 from huggingface_hub import login
 
 REPO = "nlp-final-project11/persuasion-datasets"
+REVISION = "t1-t2"  # Hub branch to push to; main is the team's shared copy
 TEST_SIZE = 0.1
 VAL_SIZE = 0.1
 SEED = 42
@@ -143,6 +144,7 @@ def parse_args():
     ap = argparse.ArgumentParser(description="Build the persuasion datasets and push them to the Hub.")
     ap.add_argument("--sources", nargs="+", choices=list(SOURCES), default=list(SOURCES),
                     help="which raw sources to build (cmv -> cmv; ddo -> ddo_switch, ddo_undecided)")
+    ap.add_argument("--revision", default=REVISION, help="Hub branch to push to, created if missing (default: %(default)s)")
     ap.add_argument("--dry-run", action="store_true", help="build and print stats without pushing")
     return ap.parse_args()
 
@@ -160,8 +162,9 @@ def main():
                 print(f"[{name}] {split:10s} {len(ds):7d} rows  "
                       + ", ".join(f"{n}={counts[i]}" for i, n in enumerate(names)))
             if not args.dry_run:
-                dsd.push_to_hub(REPO, config_name=name, private=True, token=token)
-                print(f"[{name}] pushed -> https://huggingface.co/datasets/{REPO} (config: {name}, private)")
+                dsd.push_to_hub(REPO, config_name=name, private=True, token=token, revision=args.revision)
+                print(f"[{name}] pushed -> https://huggingface.co/datasets/{REPO}/tree/{args.revision} "
+                      f"(config: {name}, branch: {args.revision}, private)")
 
 if __name__ == "__main__":
     main()
