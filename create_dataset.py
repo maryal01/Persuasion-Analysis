@@ -5,7 +5,7 @@ from collections import defaultdict
 from datasets import ClassLabel, Dataset, DatasetDict
 from huggingface_hub import login
 
-REPO = "maryal01/persuasion-datasets" 
+REPO = "nlp-final-project11/persuasion-datasets" 
 TEST_SIZE = 0.1                     
 VAL_SIZE = 0.1                     
 SEED = 42                        

@@ -12,7 +12,7 @@ from transformers import (
     TrainingArguments,
 )
 
-DATASET_REPO = "maryal01/persuasion-datasets"
+DATASET_REPO = "nlp-final-project11/persuasion-datasets"
 MODEL_NAME = "answerdotai/ModernBERT-base" 
 MODEL_REPO = "maryal01/nlp-project-modernbert" 
 MAX_LENGTH = 4096
