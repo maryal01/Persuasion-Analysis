@@ -7,18 +7,24 @@
 # Everything after the config name is passed through to train_delta.py.
 # Run `slist` to see your accounts; standby (max 4h) works with any account.
 #
+# One-time setup on a login node (RCAC asks for the conda module, not anaconda):
+#   module load conda
+#   conda create -y -p $RCAC_SCRATCH/persuasion-env python=3.12
+#   $RCAC_SCRATCH/persuasion-env/bin/pip install -r requirements.txt
+#
 # Runs longer than one job: queue several parts up front. Each waits for the previous one
 # to end (afterany, since a time-limit kill counts as a failure), resumes from its last
 # checkpoint, and parts left over after training finishes exit immediately:
 #   jid=$(sbatch --parsable -A <account> train.sub ddo_switch)
 #   for i in 1 2 3; do jid=$(sbatch --parsable -A <account> --dependency=afterany:$jid train.sub ddo_switch); done
-# To start a config over from scratch, delete outputs/<config>/.
+# If a part crashes, the remaining parts exit immediately too; fix the cause, delete
+# outputs/<config>/FAILED, and resubmit. To start a config over, delete outputs/<config>/.
 #SBATCH --job-name=persuasion
 #SBATCH --partition=a100-80gb
 #SBATCH --qos=standby
 #SBATCH --time=04:00:00
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:1
+#SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --output=%x-%j.out
@@ -28,8 +34,12 @@ set -euo pipefail
 CONFIG=${1:-cmv}
 shift || true
 
-# Marks a finished full run so later parts of a chain skip it; smoke runs never set or check it.
+# Markers for chained parts; smoke runs never set or check them.
+#   DONE:   a full run finished, so later parts have nothing to do.
+#   FAILED: a part crashed, so later parts would fail the same way while holding a GPU.
+# A time-limit kill or scancel ends this script outright, so it sets neither.
 DONE=outputs/$CONFIG/DONE
+FAILED=outputs/$CONFIG/FAILED
 SMOKE=false
 if [[ " $* " == *" --smoke "* ]]; then
     SMOKE=true
@@ -38,18 +48,29 @@ if ! $SMOKE && [[ -f $DONE ]]; then
     echo "$CONFIG already finished ($DONE exists); nothing to do."
     exit 0
 fi
+if ! $SMOKE && [[ -f $FAILED ]]; then
+    echo "An earlier part of this $CONFIG run crashed ($FAILED exists); see its log, fix the cause, delete $FAILED, and resubmit."
+    exit 1
+fi
 
 # train_delta.py calls login(token=$HF_TOKEN); without it the job blocks on an interactive prompt.
 : "${HF_TOKEN:?export HF_TOKEN in your shell before running sbatch}"
 
-# Home is capped at 25GB, so the venv and HF cache live on scratch
+# Home is capped at 25GB, so the env and HF cache live on scratch
 # (run from a clone on scratch too, since checkpoints land in ./outputs/).
 export HF_HOME=$RCAC_SCRATCH/hf_cache
-module load anaconda
-source "$RCAC_SCRATCH/persuasion-venv/bin/activate"
+PY=$RCAC_SCRATCH/persuasion-env/bin/python
 
 nvidia-smi
-python train_delta.py --dataset-config "$CONFIG" "$@"
+# Stop rather than hold a GPU while training on CPU (RCAC tracks per-job GPU utilization).
+if ! "$PY" -c "import sys, torch; sys.exit(0 if torch.cuda.is_available() else 'torch cannot use the GPU')" \
+    || ! "$PY" train_delta.py --dataset-config "$CONFIG" "$@"; then
+    if ! $SMOKE; then
+        mkdir -p "$(dirname "$FAILED")"
+        touch "$FAILED"
+    fi
+    exit 1
+fi
 
 if ! $SMOKE; then
     mkdir -p "$(dirname "$DONE")"
