@@ -2,7 +2,7 @@
 # FILENAME: train.sub
 # Slurm job for fine-tuning on Purdue's Gilbreth cluster. Submit from the repo root:
 #   sbatch -A <account> train.sub cmv
-#   sbatch -A <account> train.sub ddo --push
+#   sbatch -A <account> train.sub ddo_switch --push
 #   sbatch -A <account> -q normal -t 12:00:00 train.sub cmv   # if your account owns GPUs
 # Everything after the config name is passed through to train_delta.py.
 # Run `slist` to see your accounts; standby (max 4h) works with any account.
@@ -10,8 +10,8 @@
 # Runs longer than one job: queue several parts up front. Each waits for the previous one
 # to end (afterany, since a time-limit kill counts as a failure), resumes from its last
 # checkpoint, and parts left over after training finishes exit immediately:
-#   jid=$(sbatch --parsable -A <account> train.sub ddo)
-#   for i in 1 2 3; do jid=$(sbatch --parsable -A <account> --dependency=afterany:$jid train.sub ddo); done
+#   jid=$(sbatch --parsable -A <account> train.sub ddo_switch)
+#   for i in 1 2 3; do jid=$(sbatch --parsable -A <account> --dependency=afterany:$jid train.sub ddo_switch); done
 # To start a config over from scratch, delete outputs/<config>/.
 #SBATCH --job-name=persuasion
 #SBATCH --partition=a100-80gb
