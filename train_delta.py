@@ -151,12 +151,15 @@ def main():
         save_total_limit=2,  # the best checkpoint is kept on top of this
         logging_steps=25,
         load_best_model_at_end=not args.smoke,
-        metric_for_best_model="f1" if len(label_names) == 2 else "macro_f1",
+        # AUROC ranks without a threshold; positive-class F1 rewards predicting that class often,
+        # so on balanced cmv it preferred checkpoints that call most replies "delta"
+        metric_for_best_model="auroc" if len(label_names) == 2 else "macro_f1",
         report_to="none",
         push_to_hub=args.push and not args.smoke,
         hub_model_id=model_repo,
         hub_private_repo=False,
-        hub_token=HF_TOKEN,
+        # no hub_token: it would be pickled into every checkpoint's training_args.bin and pushed
+        # with the model; the Hub client reads HF_TOKEN from the environment instead
     )
 
     trainer = Trainer(

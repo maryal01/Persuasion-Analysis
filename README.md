@@ -64,7 +64,7 @@ Data is loaded from the `t1-t2` branch by default; `--dataset-revision main`
 loads the shared branch instead.
 
 The loss is class-weighted (inverse frequency), and the best checkpoint is chosen
-by F1 of the positive class (binary configs) or macro-F1 (`ddo_undecided`). Test
+by validation AUROC (binary configs) or macro-F1 (`ddo_undecided`). Test
 metrics include AUROC for binary configs and, for `cmv`, pairwise accuracy: the
 share of pairs whose delta reply scores higher than its no-delta reply.
 
