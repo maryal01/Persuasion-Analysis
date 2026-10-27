@@ -33,7 +33,7 @@ def parse_args():
     ap = argparse.ArgumentParser(description="Fine-tune ModernBERT on a persuasion dataset.")
     ap.add_argument("--dataset-config", default = "cmv", help="dataset config/subset name (cmv, ddo_switch, ddo_undecided); omit for default")
     ap.add_argument("--dataset-revision", default=DATASET_REVISION, help="branch of the dataset repo to load (default: %(default)s)")
-    ap.add_argument("--push", action="store_true", help=f"push the (public) model to {MODEL_REPO}-<config>")
+    ap.add_argument("--push", action="store_true", help=f"push the model to a private repo, {MODEL_REPO}-<config>")
     ap.add_argument("--smoke", action="store_true", help="tiny/fast pipeline check")
     ap.add_argument("--freeze", action="store_true", help="freeze the encoder, train only the classifier head (cheap, lower accuracy)")
     return ap.parse_args()
@@ -157,7 +157,7 @@ def main():
         report_to="none",
         push_to_hub=args.push and not args.smoke,
         hub_model_id=model_repo,
-        hub_private_repo=False,
+        hub_private_repo=True,  # only applies when the repo is created; change visibility on the Hub
         # no hub_token: it would be pickled into every checkpoint's training_args.bin and pushed
         # with the model; the Hub client reads HF_TOKEN from the environment instead
     )
@@ -186,7 +186,7 @@ def main():
 
     if args.push and not args.smoke:
         trainer.push_to_hub()
-        print(f"\nPushed model -> https://huggingface.co/{model_repo} (public)")
+        print(f"\nPushed model -> https://huggingface.co/{model_repo} (private)")
     elif not args.smoke:
         trainer.save_model(outputdir)
         tok.save_pretrained(outputdir)

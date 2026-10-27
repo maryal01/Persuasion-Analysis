@@ -53,7 +53,7 @@ push, so the shared `main` branch is left alone. Pass `--revision main` to publi
 # train on a config, save model locally
 python train_delta.py --dataset-config cmv
 
-# train and push to nlp-final-project11/nlp-project-modernbert-<config>
+# train and push to the private repo nlp-final-project11/nlp-project-modernbert-<config>
 python train_delta.py --dataset-config ddo_switch --push
 
 # fast end-to-end pipeline check
