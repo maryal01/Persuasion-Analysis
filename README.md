@@ -67,3 +67,21 @@ The loss is class-weighted (inverse frequency), and the best checkpoint is chose
 by validation AUROC (binary configs) or macro-F1 (`ddo_undecided`). Test
 metrics include AUROC for binary configs and, for `cmv`, pairwise accuracy: the
 share of pairs whose delta reply scores higher than its no-delta reply.
+
+Runs save a checkpoint every 500 steps and resume from the newest one in
+`outputs/<config>/`; delete that directory to start over.
+
+## 3. Train on Gilbreth — `train.sub`
+Clone the repo onto scratch, then create the environment at `$RCAC_SCRATCH/persuasion-env`
+with the `conda` module, as RCAC recommends; the commands are in the header of `train.sub`.
+That header also shows how to submit, and how to chain several 4-hour standby jobs into
+one longer run.
+
+Rules worth knowing (RCAC policies): run everything heavier than setup through `sbatch`,
+since busy processes on login nodes are killed automatically. Never put tokens in scripts,
+which RCAC logs. Scratch files untouched for 60 days are purged, so keep results elsewhere
+(`--push`, Data Depot, or Fortress). To set the token without saving it in your shell history:
+
+```bash
+read -rs HF_TOKEN && export HF_TOKEN
+```
