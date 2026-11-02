@@ -35,16 +35,21 @@ def parse_args():
 
 def compute_metrics(eval_pred):
     logits, labels = eval_pred
-    preds = np.asarray(logits).argmax(-1)
-    labels = np.asarray(labels)
-    acc = (preds == labels).mean()
-    tp = int(((preds == 1) & (labels == 1)).sum())
-    fp = int(((preds == 1) & (labels == 0)).sum())
-    fn = int(((preds == 0) & (labels == 1)).sum())
-    prec = tp / (tp + fp) if (tp + fp) else 0.0
-    rec = tp / (tp + fn) if (tp + fn) else 0.0
-    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0
-    return {"accuracy": float(acc), "precision": prec, "recall": rec, "f1": f1}
+    logits, labels = np.asarray(logits), np.asarray(labels)
+    preds = logits.argmax(-1)
+    per_class = []
+    for c in range(logits.shape[1]):
+        tp = int(((preds == c) & (labels == c)).sum())
+        fp = int(((preds == c) & (labels != c)).sum())
+        fn = int(((preds != c) & (labels == c)).sum())
+        prec = tp / (tp + fp) if (tp + fp) else 0.0
+        rec = tp / (tp + fn) if (tp + fn) else 0.0
+        per_class.append((prec, rec, 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0))
+    metrics = {"accuracy": float((preds == labels).mean()), "macro_f1": float(np.mean([f for _, _, f in per_class]))}
+    if logits.shape[1] == 2:  # report the positive class (delta, switched)
+        prec, rec, f1 = per_class[1]
+        metrics.update(precision=prec, recall=rec, f1=f1)
+    return metrics
 
 def main():
     args = parse_args()
@@ -60,6 +65,8 @@ def main():
     if args.smoke:
         ds = DatasetDict({k: v.select(range(32)) for k, v in ds.items()})
 
+    label_names = ds["train"].features["labels"].names
+
     tok = AutoTokenizer.from_pretrained(MODEL_NAME, token=HF_TOKEN)
 
     def tokenize(batch):
@@ -68,9 +75,9 @@ def main():
     ds = ds.map(tokenize, batched=True, remove_columns=["original", "reply"])
 
     model = AutoModelForSequenceClassification.from_pretrained(
-        MODEL_NAME, num_labels=2,
-        id2label={0: "negative", 1: "positive"},
-        label2id={"negative": 0, "positive": 1},
+        MODEL_NAME, num_labels=len(label_names),
+        id2label=dict(enumerate(label_names)),
+        label2id={n: i for i, n in enumerate(label_names)},
         token=HF_TOKEN,
     )
 
@@ -94,7 +101,7 @@ def main():
         save_strategy="epoch",
         logging_steps=25,
         load_best_model_at_end=not args.smoke,
-        metric_for_best_model="f1",
+        metric_for_best_model="f1" if len(label_names) == 2 else "macro_f1",
         report_to="none",
         push_to_hub=args.push and not args.smoke,
         hub_model_id=model_repo,
