@@ -3,6 +3,8 @@ import os
 from collections import defaultdict
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 from datasets import DatasetDict, load_dataset
 from huggingface_hub import login
 from transformers import (
@@ -69,6 +71,16 @@ def pairwise_accuracy(scores, labels, pair_ids):
     wins = [float(d[1] > d[0]) + 0.5 * float(d[1] == d[0]) for d in pairs.values() if len(d) == 2]
     return float(np.mean(wins)) if wins else float("nan")
 
+def weighted_cross_entropy(weights):
+    """Class-weighted loss for Trainer(compute_loss_func=...). The Trainer expects such a loss to be
+    normalized over the whole accumulated batch, so sum it and divide by that batch's label count.
+    """
+    def loss_fn(outputs, labels, num_items_in_batch=None):
+        logits = outputs.logits
+        loss = F.cross_entropy(logits, labels, weight=weights.to(logits.device, logits.dtype), reduction="sum")
+        return loss / (num_items_in_batch if num_items_in_batch is not None else labels.numel())
+    return loss_fn
+
 def main():
     args = parse_args()
     login(token=HF_TOKEN)
@@ -84,6 +96,10 @@ def main():
         ds = DatasetDict({k: v.select(range(32)) for k, v in ds.items()})
 
     label_names = ds["train"].features["labels"].names
+    counts = np.bincount(list(ds["train"]["labels"]), minlength=len(label_names))
+    # inverse-frequency weights, averaging 1 over the training set; all 1s for balanced configs
+    class_weights = torch.tensor(counts.sum() / (len(label_names) * np.maximum(counts, 1)), dtype=torch.float32)
+    print("[CLASSES] " + ", ".join(f"{n}={c} (weight {w:.2f})" for n, c, w in zip(label_names, counts, class_weights.tolist())))
 
     tok = AutoTokenizer.from_pretrained(MODEL_NAME, token=HF_TOKEN)
 
@@ -134,6 +150,7 @@ def main():
         model=model, args=targs,
         train_dataset=ds["train"], eval_dataset=ds["validation"],
         data_collator=collator, compute_metrics=compute_metrics,
+        compute_loss_func=weighted_cross_entropy(class_weights),
     )
 
     trainer.train()
