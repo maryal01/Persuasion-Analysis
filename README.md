@@ -26,10 +26,20 @@ export HF_TOKEN=hf_xxx
 ```
 
 ## 1. Build & publish the datasets — `create_dataset.py`
+Raw inputs (gitignored), relative to the project root:
+- `cmv/pairs.jsonl` — decompressed `pairs.jsonl.bz2` from [Webis-CMV-20](https://zenodo.org/records/3778298)
+- `ddo/debates.json` — from the DDO corpus
+
 ```bash
-# run from the project root so the relative paths in SOURCES resolve
+# build and print split/label counts without pushing
+python create_dataset.py --dry-run
+
+# build and push every config (or one source: --sources cmv)
 python create_dataset.py
 ```
+
+Pushes go to the `t1-t2` branch of the dataset repo, which is created on first
+push, so the shared `main` branch is left alone. Pass `--revision main` to publish there.
 
 ## 2. Fine-tune & publish the model — `train_delta.py`
 ```bash
@@ -42,3 +52,6 @@ python train_delta.py --dataset-config ddo --push
 # fast end-to-end pipeline check
 python train_delta.py --smoke
 ```
+
+Data is loaded from the `t1-t2` branch by default; `--dataset-revision main`
+loads the shared branch instead.
