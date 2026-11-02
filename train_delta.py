@@ -33,6 +33,15 @@ def parse_args():
     ap.add_argument("--freeze", action="store_true", help="freeze the encoder, train only the classifier head (cheap, lower accuracy)")
     return ap.parse_args()
 
+def binary_auroc(scores, labels):
+    """Chance a random positive outscores a random negative (ties count half); nan if a class is absent."""
+    pos, neg = int((labels == 1).sum()), int((labels == 0).sum())
+    if not pos or not neg:
+        return float("nan")
+    _, inverse, counts = np.unique(scores, return_inverse=True, return_counts=True)
+    ranks = (np.cumsum(counts) - (counts - 1) / 2)[inverse]  # 1-based ranks, averaged over ties
+    return float((ranks[labels == 1].sum() - pos * (pos + 1) / 2) / (pos * neg))
+
 def compute_metrics(eval_pred):
     logits, labels = eval_pred
     logits, labels = np.asarray(logits), np.asarray(labels)
@@ -48,7 +57,7 @@ def compute_metrics(eval_pred):
     metrics = {"accuracy": float((preds == labels).mean()), "macro_f1": float(np.mean([f for _, _, f in per_class]))}
     if logits.shape[1] == 2:  # report the positive class (delta, switched)
         prec, rec, f1 = per_class[1]
-        metrics.update(precision=prec, recall=rec, f1=f1)
+        metrics.update(precision=prec, recall=rec, f1=f1, auroc=binary_auroc(logits[:, 1] - logits[:, 0], labels))
     return metrics
 
 def main():
@@ -101,7 +110,9 @@ def main():
         save_strategy="epoch",
         logging_steps=25,
         load_best_model_at_end=not args.smoke,
-        metric_for_best_model="f1" if len(label_names) == 2 else "macro_f1",
+        # AUROC ranks without a threshold; positive-class F1 rewards predicting that class often,
+        # so on balanced cmv it preferred checkpoints that call most replies "delta"
+        metric_for_best_model="auroc" if len(label_names) == 2 else "macro_f1",
         report_to="none",
         push_to_hub=args.push and not args.smoke,
         hub_model_id=model_repo,
