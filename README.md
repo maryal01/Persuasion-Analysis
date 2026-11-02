@@ -7,13 +7,16 @@ and analysis:
 | Config | Task | `original` | `reply` | `label` | Extra columns |
 |--------|------|------------|---------|---------|---------------|
 | `cmv` | T1: CMV persuasion (Webis-CMV-20, Al Khatib et al. 2020) | post title + selftext | the persuader's comments in one reply branch | `delta` vs `nodelta` | `pair_id`, `post_id` |
-| `ddo` | who won the debate (debate.org, "Exploring the Role of Prior Beliefs", Durmus & Cardie 2018) | debate resolution | one side's rounds | `won` vs `lost` | `debate_id` |
+| `ddo_switch` | T2: did a decided voter switch sides? (DDO, Durmus & Cardie 2019) | resolution + voter's side before | full debate transcript | `switched` vs `stayed` | `debate_id`, `voter`, `before`, `after`, `year`, `filled_other_criteria` |
+| `ddo_undecided` | T2: which side does an undecided (tied) voter end on? | resolution + voter's side before (`Tie`) | full debate transcript | `tie` / `pro` / `con` | same as `ddo_switch` |
 
 Each example is a **(context, reply) pair** — a reply is only meaningful relative
 to the view it argues against, so both are tokenized together as a text pair.
 
 Splits are 80/10/10 by **group**: all rows of a CMV post, or of a DDO debate,
-land in the same split.
+land in the same split (the two DDO configs share one assignment). On DDO, votes
+by the debaters themselves are dropped, and so are side-to-tie votes in
+`ddo_switch`. Empty turns and the placeholder text `forfeit` are removed from transcripts.
 
 ## Setup
 
@@ -51,7 +54,7 @@ push, so the shared `main` branch is left alone. Pass `--revision main` to publi
 python train_delta.py --dataset-config cmv
 
 # train and push to the private repo nlp-final-project11/nlp-project-modernbert-<config>
-python train_delta.py --dataset-config ddo --push
+python train_delta.py --dataset-config ddo_switch --push
 
 # fast end-to-end pipeline check
 python train_delta.py --smoke

@@ -26,7 +26,7 @@ HF_TOKEN = os.environ.get("HF_TOKEN")
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Fine-tune ModernBERT on a persuasion dataset.")
-    ap.add_argument("--dataset-config", default = "cmv", help="dataset config/subset name (e.g. cmv, ddo); omit for default")
+    ap.add_argument("--dataset-config", default = "cmv", help="dataset config/subset name (cmv, ddo_switch, ddo_undecided); omit for default")
     ap.add_argument("--dataset-revision", default=DATASET_REVISION, help="branch of the dataset repo to load (default: %(default)s)")
     ap.add_argument("--push", action="store_true", help=f"push the model to a private repo, {MODEL_REPO}-<config>")
     ap.add_argument("--smoke", action="store_true", help="tiny/fast pipeline check")
