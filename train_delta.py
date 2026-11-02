@@ -96,7 +96,8 @@ def main():
         push_to_hub=args.push and not args.smoke,
         hub_model_id=MODEL_REPO,
         hub_private_repo=False,
-        hub_token=HF_TOKEN,
+        # no hub_token: it would be pickled into every checkpoint's training_args.bin and pushed
+        # with the model; the Hub client reads HF_TOKEN from the environment instead
     )
 
     trainer = Trainer(
