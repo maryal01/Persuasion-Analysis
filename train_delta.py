@@ -14,7 +14,7 @@ from transformers import (
 
 DATASET_REPO = "nlp-final-project11/persuasion-datasets"
 MODEL_NAME = "answerdotai/ModernBERT-base" 
-MODEL_REPO = "maryal01/nlp-project-modernbert" 
+MODEL_REPO = "nlp-final-project11/nlp-project-modernbert"  # pushed to {MODEL_REPO}-{config}
 MAX_LENGTH = 4096
 BATCH_SIZE = 4
 GRAD_ACCUM = 8
@@ -26,7 +26,7 @@ HF_TOKEN = os.environ.get("HF_TOKEN")
 def parse_args():
     ap = argparse.ArgumentParser(description="Fine-tune ModernBERT on a persuasion dataset.")
     ap.add_argument("--dataset-config", default = "cmv", help="dataset config/subset name (e.g. cmv, ddo); omit for default")
-    ap.add_argument("--push", action="store_true", help=f"push the (public) model to {MODEL_REPO}")
+    ap.add_argument("--push", action="store_true", help=f"push the model to a private repo, {MODEL_REPO}-<config>")
     ap.add_argument("--smoke", action="store_true", help="tiny/fast pipeline check")
     ap.add_argument("--freeze", action="store_true", help="freeze the encoder, train only the classifier head (cheap, lower accuracy)")
     return ap.parse_args()
@@ -79,6 +79,7 @@ def main():
 
     collator = DataCollatorWithPadding(tokenizer=tok)
     outputdir = f"outputs/{args.dataset_config}"
+    model_repo = f"{MODEL_REPO}-{args.dataset_config}"
     targs = TrainingArguments(
         output_dir=outputdir,
         per_device_train_batch_size=batch_size,
@@ -94,8 +95,8 @@ def main():
         metric_for_best_model="f1",
         report_to="none",
         push_to_hub=args.push and not args.smoke,
-        hub_model_id=MODEL_REPO,
-        hub_private_repo=False,
+        hub_model_id=model_repo,
+        hub_private_repo=True,  # only applies when the repo is created; change visibility on the Hub
         # no hub_token: it would be pickled into every checkpoint's training_args.bin and pushed
         # with the model; the Hub client reads HF_TOKEN from the environment instead
     )
@@ -115,7 +116,7 @@ def main():
 
     if args.push and not args.smoke:
         trainer.push_to_hub()
-        print(f"\nPushed model -> https://huggingface.co/{MODEL_REPO} (public)")
+        print(f"\nPushed model -> https://huggingface.co/{model_repo} (private)")
     elif not args.smoke:
         trainer.save_model(outputdir)
         tok.save_pretrained(outputdir)
