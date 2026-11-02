@@ -1,5 +1,6 @@
 import argparse
 import os
+from collections import defaultdict
 
 import numpy as np
 from datasets import DatasetDict, load_dataset
@@ -59,6 +60,14 @@ def compute_metrics(eval_pred):
         prec, rec, f1 = per_class[1]
         metrics.update(precision=prec, recall=rec, f1=f1, auroc=binary_auroc(logits[:, 1] - logits[:, 0], labels))
     return metrics
+
+def pairwise_accuracy(scores, labels, pair_ids):
+    """T1: share of CMV pairs whose delta reply outscores its no-delta reply (ties count half)."""
+    pairs = defaultdict(dict)
+    for s, l, p in zip(scores, labels, pair_ids):
+        pairs[p][int(l)] = s
+    wins = [float(d[1] > d[0]) + 0.5 * float(d[1] == d[0]) for d in pairs.values() if len(d) == 2]
+    return float(np.mean(wins)) if wins else float("nan")
 
 def main():
     args = parse_args()
@@ -127,12 +136,16 @@ def main():
         data_collator=collator, compute_metrics=compute_metrics,
     )
 
-    trainer.train()    
+    trainer.train()
+
+    pred = trainer.predict(ds["test"])
+    metrics = {k[5:]: v for k, v in pred.metrics.items() if k.startswith("test_")}
+    if "pair_id" in ds["test"].column_names:
+        scores = pred.predictions[:, 1] - pred.predictions[:, 0]
+        metrics["pairwise_acc"] = pairwise_accuracy(scores, pred.label_ids, ds["test"]["pair_id"])
     print("\n=== TEST METRICS ===")
-    for k, v in trainer.evaluate(ds["test"]).items():
-        if k.startswith("eval_"):
-            name = k[5:]
-            print(f"  {name:10s}: {v:.4f}" if isinstance(v, float) else f"  {name}: {v}")
+    for name, v in metrics.items():
+        print(f"  {name:10s}: {v:.4f}" if isinstance(v, float) else f"  {name}: {v}")
 
     if args.push and not args.smoke:
         trainer.push_to_hub()
