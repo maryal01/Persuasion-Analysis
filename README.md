@@ -1,15 +1,19 @@
 # Persuasion Classification (CMV + DDO)
 
-Fine-tune ModernBERT to predict whether an argument is persuasive, from two
-sources with a shared `{original, reply, label}` schema:
+Fine-tune ModernBERT to predict persuasion on two platforms. Every config shares
+the `{original, reply, label}` text schema, plus id columns used for splitting
+and analysis:
 
-| Config | Source | `original` | `reply` | `label` |
-|--------|--------|------------|---------|---------|
-| `cmv`  | Reddit r/changemyview ("Winning Arguments", Tan et al. 2016) | post title + selftext | a reply branch | `delta` (changed OP's mind) vs `nodelta` |
-| `ddo`  | debate.org ("Exploring the Role of Prior Beliefs", Durmus & Cardie 2018) | debate resolution | one side's rounds | `won` vs `lost` |
+| Config | Task | `original` | `reply` | `label` | Extra columns |
+|--------|------|------------|---------|---------|---------------|
+| `cmv` | T1: CMV persuasion (Webis-CMV-20, Al Khatib et al. 2020) | post title + selftext | the persuader's comments in one reply branch | `delta` vs `nodelta` | `pair_id`, `post_id` |
+| `ddo` | who won the debate (debate.org, "Exploring the Role of Prior Beliefs", Durmus & Cardie 2018) | debate resolution | one side's rounds | `won` vs `lost` | `debate_id` |
 
 Each example is a **(context, reply) pair** — a reply is only meaningful relative
 to the view it argues against, so both are tokenized together as a text pair.
+
+Splits are 80/10/10 by **group**: all rows of a CMV post, or of a DDO debate,
+land in the same split.
 
 ## Setup
 
