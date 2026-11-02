@@ -13,6 +13,7 @@ from transformers import (
 )
 
 DATASET_REPO = "nlp-final-project11/persuasion-datasets"
+DATASET_REVISION = "t1-t2"  # Hub branch holding the T1/T2 configs built by create_dataset.py
 MODEL_NAME = "answerdotai/ModernBERT-base" 
 MODEL_REPO = "nlp-final-project11/nlp-project-modernbert"  # pushed to {MODEL_REPO}-{config}
 MAX_LENGTH = 4096
@@ -26,6 +27,7 @@ HF_TOKEN = os.environ.get("HF_TOKEN")
 def parse_args():
     ap = argparse.ArgumentParser(description="Fine-tune ModernBERT on a persuasion dataset.")
     ap.add_argument("--dataset-config", default = "cmv", help="dataset config/subset name (e.g. cmv, ddo); omit for default")
+    ap.add_argument("--dataset-revision", default=DATASET_REVISION, help="branch of the dataset repo to load (default: %(default)s)")
     ap.add_argument("--push", action="store_true", help=f"push the model to a private repo, {MODEL_REPO}-<config>")
     ap.add_argument("--smoke", action="store_true", help="tiny/fast pipeline check")
     ap.add_argument("--freeze", action="store_true", help="freeze the encoder, train only the classifier head (cheap, lower accuracy)")
@@ -54,7 +56,7 @@ def main():
     grad_accum = 1   if args.smoke else GRAD_ACCUM
     max_length = 256 if args.smoke else MAX_LENGTH
 
-    ds = load_dataset(DATASET_REPO, args.dataset_config, token=HF_TOKEN).rename_column("label", "labels")
+    ds = load_dataset(DATASET_REPO, args.dataset_config, revision=args.dataset_revision, token=HF_TOKEN).rename_column("label", "labels")
     if args.smoke:
         ds = DatasetDict({k: v.select(range(32)) for k, v in ds.items()})
 

@@ -1,3 +1,4 @@
+import argparse
 import json
 import ijson
 import os
@@ -5,10 +6,11 @@ from collections import defaultdict
 from datasets import ClassLabel, Dataset, DatasetDict
 from huggingface_hub import login
 
-REPO = "nlp-final-project11/persuasion-datasets" 
-TEST_SIZE = 0.1                     
-VAL_SIZE = 0.1                     
-SEED = 42                        
+REPO = "nlp-final-project11/persuasion-datasets"
+REVISION = "t1-t2"  # Hub branch to push to; main is the team's shared copy
+TEST_SIZE = 0.1
+VAL_SIZE = 0.1
+SEED = 42
 
 def build_pairs(path):
     """CMV pairs.jsonl -> {original, reply, label}, two rows per input pair.
@@ -62,14 +64,26 @@ def build_ddo(path, limit=None):
     ds = Dataset.from_dict({"original": originals, "reply": replies, "label": labels})
     return ds.cast_column("label", ClassLabel(names=["lost", "won"]))
 
+SOURCES = {
+    "cmv": ("cmv/pairs.jsonl", build_pairs),
+    "ddo": ("ddo/debates.json", build_ddo),
+}
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="Build the persuasion datasets and push them to the Hub.")
+    ap.add_argument("--sources", nargs="+", choices=list(SOURCES), default=list(SOURCES),
+                    help="which raw sources to build")
+    ap.add_argument("--revision", default=REVISION, help="Hub branch to push to, created if missing (default: %(default)s)")
+    ap.add_argument("--dry-run", action="store_true", help="build and print stats without pushing")
+    return ap.parse_args()
+
 def main():
+    args = parse_args()
     token = os.environ.get("HF_TOKEN")
-    login(token=token)
-    sources = {
-        "cmv": ("cmv/pairs.jsonl", build_pairs),
-        "ddo": ("ddo/debates.json", build_ddo),
-    }
-    for name, (path, builder) in sources.items():
+    if not args.dry_run:
+        login(token=token)
+    for name in args.sources:
+        path, builder = SOURCES[name]
         ds = builder(path)
         pos = sum(ds["label"])
         print(f"[{name}] built {len(ds)} rows ({pos} positive / {len(ds) - pos} negative)")
@@ -80,8 +94,10 @@ def main():
 
         dsd = DatasetDict(train=tv["train"], validation=tv["test"], test=tt["test"])
         print(f"[{name}] split -> " + ", ".join(f"{k}={len(v)}" for k, v in dsd.items()))
-        dsd.push_to_hub(REPO, config_name=name, private=True, token=token)
-        print(f"[{name}] pushed -> https://huggingface.co/datasets/{REPO} (config: {name}, private)")
+        if not args.dry_run:
+            dsd.push_to_hub(REPO, config_name=name, private=True, token=token, revision=args.revision)
+            print(f"[{name}] pushed -> https://huggingface.co/datasets/{REPO}/tree/{args.revision} "
+                  f"(config: {name}, branch: {args.revision}, private)")
 
 if __name__ == "__main__":
     main()
