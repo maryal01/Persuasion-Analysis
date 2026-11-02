@@ -1,4 +1,5 @@
 import argparse
+import glob
 import os
 from collections import defaultdict
 
@@ -24,6 +25,7 @@ BATCH_SIZE = 4
 GRAD_ACCUM = 8
 EPOCHS = 3
 LR = 2e-5
+SAVE_STEPS = 500  # eval + checkpoint interval; bounds the work lost when a job hits its time limit
 
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
@@ -81,6 +83,15 @@ def weighted_cross_entropy(weights):
         return loss / (num_items_in_batch if num_items_in_batch is not None else labels.numel())
     return loss_fn
 
+def last_complete_checkpoint(outputdir):
+    """Newest checkpoint-N in outputdir, or None. The Trainer writes trainer_state.json last,
+    so a checkpoint cut off mid-save (e.g. by a Slurm time limit) lacks it and is skipped.
+    """
+    states = glob.glob(os.path.join(outputdir, "checkpoint-*", "trainer_state.json"))
+    if not states:
+        return None
+    return max((os.path.dirname(s) for s in states), key=lambda d: int(d.rsplit("-", 1)[1]))
+
 def main():
     args = parse_args()
     login(token=HF_TOKEN)
@@ -90,6 +101,7 @@ def main():
     batch_size = 1   if args.smoke else BATCH_SIZE
     grad_accum = 1   if args.smoke else GRAD_ACCUM
     max_length = 256 if args.smoke else MAX_LENGTH
+    save_steps = 2   if args.smoke else SAVE_STEPS
 
     ds = load_dataset(DATASET_REPO, args.dataset_config, revision=args.dataset_revision, token=HF_TOKEN).rename_column("label", "labels")
     if args.smoke:
@@ -121,7 +133,8 @@ def main():
         print("[FREEZE] encoder frozen; training classifier head only")
 
     collator = DataCollatorWithPadding(tokenizer=tok)
-    outputdir = f"outputs/{args.dataset_config}"
+    # smoke runs get their own dir so a real run never resumes from a smoke checkpoint
+    outputdir = f"outputs/{args.dataset_config}" + ("-smoke" if args.smoke else "")
     model_repo = f"{MODEL_REPO}-{args.dataset_config}"
     targs = TrainingArguments(
         output_dir=outputdir,
@@ -131,8 +144,11 @@ def main():
         num_train_epochs=epochs,
         max_steps=max_steps,
         learning_rate=LR,
-        eval_strategy="epoch",
-        save_strategy="epoch",
+        eval_strategy="steps",
+        eval_steps=save_steps,
+        save_strategy="steps",
+        save_steps=save_steps,
+        save_total_limit=2,  # the best checkpoint is kept on top of this
         logging_steps=25,
         load_best_model_at_end=not args.smoke,
         # AUROC ranks without a threshold; positive-class F1 rewards predicting that class often,
@@ -153,7 +169,11 @@ def main():
         compute_loss_func=weighted_cross_entropy(class_weights),
     )
 
-    trainer.train()
+    # Continue a run cut off by a time limit; delete outputs/<config> to start over.
+    resume = None if args.smoke else last_complete_checkpoint(outputdir)
+    if resume:
+        print(f"[RESUME] continuing from {resume}")
+    trainer.train(resume_from_checkpoint=resume)
 
     pred = trainer.predict(ds["test"])
     metrics = {k[5:]: v for k, v in pred.metrics.items() if k.startswith("test_")}

@@ -67,3 +67,6 @@ The loss is class-weighted (inverse frequency), and the best checkpoint is chose
 by validation AUROC (binary configs) or macro-F1 (`ddo_undecided`). Test
 metrics include AUROC for binary configs and, for `cmv`, pairwise accuracy: the
 share of pairs whose delta reply scores higher than its no-delta reply.
+
+Runs save a checkpoint every 500 steps and resume from the newest one in
+`outputs/<config>/`; delete that directory to start over.
