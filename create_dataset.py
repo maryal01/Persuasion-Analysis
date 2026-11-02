@@ -14,6 +14,15 @@ TEST_SIZE = 0.1
 VAL_SIZE = 0.1
 SEED = 42
 
+BEFORE = "Agreed with before the debate"
+AFTER = "Agreed with after the debate"
+OTHER_CRITERIA = (
+    "Who had better conduct",
+    "Had better spelling and grammar",
+    "Made more convincing arguments",
+    "Used the most reliable sources",
+)
+
 def split_of(group_id):
     """Deterministic split for a CMV post or DDO debate, so all of its rows land in the same split
     and every config built from the same source shares the assignment.
@@ -59,49 +68,81 @@ def build_cmv(path):
                              "pair_id": pair_id, "post_id": r["submission_id"], "split": split})
     return {"cmv": to_splits(rows, ["nodelta", "delta"])}
 
-def build_ddo(path, limit=None):
-    """debate.org debates.json -> {original, reply, label, debate_id}, two rows per decided debate.
-
-    Both sides of a debate land in the same split.
+def debate_transcript(d):
+    """Rounds as 'Round i' blocks of 'Pro: ...' / 'Con: ...' turns, dropping empty turns and the
+    placeholder text 'forfeit' that DDO stores for a skipped turn.
     """
-    rows = []
-    with open(path) as fh:
-        for i, (debate_id, d) in enumerate(ijson.kvitems(fh, "")):
-            if limit is not None and i >= limit:
-                break
-            if d.get("forfeit_label"):
-                continue  # forfeits aren't won on the merits
-            status = {
-                d.get("participant_1_position"): d.get("participant_1_status"),
-                d.get("participant_2_position"): d.get("participant_2_status"),
-            }
-            if {status.get("Pro"), status.get("Con")} != {"Winning", "Losing"}:
-                continue  # need exactly one clear winner (skip ties / undecided)
+    rounds = []
+    for i, rnd in enumerate(d.get("rounds", []), 1):
+        turns = [f"{t['side']}: {t['text'].strip()}" for t in rnd
+                 if (t.get("text") or "").strip().lower() not in ("", "forfeit")]
+        if turns:
+            rounds.append(f"Round {i}\n" + "\n\n".join(turns))
+    return "\n\n".join(rounds)
 
-            resolution = (d.get("title", "") or "").strip()
-            by_side = defaultdict(list)
-            for rnd in d.get("rounds", []):
-                for turn in rnd:
-                    by_side[turn["side"]].append(turn.get("text", ""))
+def stance(votes_map, positions, field):
+    """Side ('Pro', 'Con' or 'Tie') a voter marked for `field`, or None if not exactly one is marked."""
+    sides = [("Tie" if name == "Tied" else positions.get(name))
+             for name, marks in votes_map.items() if marks.get(field) is True]
+    return sides[0] if len(sides) == 1 else None
 
-            for side in ("Pro", "Con"):
-                reply = "\n\n".join(by_side[side]).strip()
-                if not reply:
-                    continue  # side never spoke
-                rows.append({"original": resolution, "reply": reply,
-                             "label": 1 if status[side] == "Winning" else 0,
-                             "debate_id": debate_id, "split": split_of(debate_id)})
-    return {"ddo": to_splits(rows, ["lost", "won"])}
+def build_ddo_votes(path):
+    """T2. debates.json -> one row per audience vote, in two configs:
+
+    ddo_switch    voters with a side before and after the debate; label stayed / switched
+    ddo_undecided voters tied before the debate; label tie / pro / con after it
+
+    Side-to-tie votes are dropped, matching the proposal's ~66k decided votes. So are votes by the
+    debaters themselves, repeat votes, and votes without before/after stances. `filled_other_criteria`
+    flags voters who marked a debater on another criterion, since a pre-debate tie can mean "skipped".
+    """
+    switch, undecided = [], []
+    with open(path, "rb") as fh:
+        for debate_id, d in ijson.kvitems(fh, ""):
+            positions = {d.get("participant_1_name"): d.get("participant_1_position"),
+                         d.get("participant_2_name"): d.get("participant_2_position")}
+            title = (d.get("title", "") or "").strip()
+            year = int(d["start_date"].split("/")[-1]) if d.get("start_date") else None
+            transcript = None
+            seen = set()
+            for v in d.get("votes", []):
+                voter = v.get("user_name")
+                if voter in positions or voter in seen:
+                    continue
+                seen.add(voter)
+                votes_map = v.get("votes_map") or {}
+                before = stance(votes_map, positions, BEFORE)
+                after = stance(votes_map, positions, AFTER)
+                if before is None or after is None or (before != "Tie" and after == "Tie"):
+                    continue
+                if transcript is None:
+                    transcript = debate_transcript(d)
+                if not transcript:
+                    break
+                row = {
+                    "original": f"Resolution: {title}\nVoter's side before the debate: {before}",
+                    "reply": transcript,
+                    "debate_id": debate_id, "voter": voter, "before": before, "after": after, "year": year,
+                    "filled_other_criteria": any(marks.get(c) is True for name, marks in votes_map.items()
+                                                 if name != "Tied" for c in OTHER_CRITERIA),
+                    "split": split_of(debate_id),
+                }
+                if before == "Tie":
+                    undecided.append({**row, "label": {"Tie": 0, "Pro": 1, "Con": 2}[after]})
+                else:
+                    switch.append({**row, "label": int(after != before)})
+    return {"ddo_switch": to_splits(switch, ["stayed", "switched"]),
+            "ddo_undecided": to_splits(undecided, ["tie", "pro", "con"])}
 
 SOURCES = {
     "cmv": ("cmv/pairs.jsonl", build_cmv),
-    "ddo": ("ddo/debates.json", build_ddo),
+    "ddo": ("ddo/debates.json", build_ddo_votes),
 }
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Build the persuasion datasets and push them to the Hub.")
     ap.add_argument("--sources", nargs="+", choices=list(SOURCES), default=list(SOURCES),
-                    help="which raw sources to build")
+                    help="which raw sources to build (cmv -> cmv; ddo -> ddo_switch, ddo_undecided)")
     ap.add_argument("--revision", default=REVISION, help="Hub branch to push to, created if missing (default: %(default)s)")
     ap.add_argument("--dry-run", action="store_true", help="build and print stats without pushing")
     return ap.parse_args()
