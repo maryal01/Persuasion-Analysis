@@ -1,8 +1,10 @@
 import argparse
+import hashlib
 import json
-import ijson
 import os
-from collections import defaultdict
+from collections import Counter, defaultdict
+
+import ijson
 from datasets import ClassLabel, Dataset, DatasetDict
 from huggingface_hub import login
 
@@ -12,30 +14,59 @@ TEST_SIZE = 0.1
 VAL_SIZE = 0.1
 SEED = 42
 
-def build_pairs(path):
-    """CMV pairs.jsonl -> {original, reply, label}, two rows per input pair.
+def split_of(group_id):
+    """Deterministic split for a CMV post or DDO debate, so all of its rows land in the same split
+    and every config built from the same source shares the assignment.
     """
-    originals, replies, labels = [], [], []
+    h = int(hashlib.md5(f"{SEED}:{group_id}".encode()).hexdigest(), 16) % 1000 / 1000
+    if h < TEST_SIZE:
+        return "test"
+    if h < TEST_SIZE + VAL_SIZE:
+        return "validation"
+    return "train"
+
+def to_splits(rows, label_names):
+    """Rows (dicts with a 'split' key) -> DatasetDict(train, validation, test) with a ClassLabel 'label'."""
+    columns = defaultdict(lambda: defaultdict(list))
+    for row in rows:
+        split = row.pop("split")
+        for k, v in row.items():
+            columns[split][k].append(v)
+    return DatasetDict({
+        name: Dataset.from_dict(dict(columns[name])).cast_column("label", ClassLabel(names=label_names))
+        for name in ("train", "validation", "test")
+    })
+
+def build_cmv(path):
+    """T1. Webis-CMV-20 pairs.jsonl -> {original, reply, label, pair_id, post_id}, two rows per pair.
+
+    Pairs are split by post, so a post's pairs never straddle train and test; score a pair by
+    whether its delta row outscores its no-delta row. Pairs whose reply was written by the OP
+    (21 no-delta branches) are dropped, since OPs don't award themselves deltas.
+    """
+    rows = []
     with open(path) as fh:
-        for line in fh:
+        for pair_id, line in enumerate(fh):
             r = json.loads(line)
             s = r["submission"]
+            if s.get("author") in (r["delta_comment"]["author"], r["nodelta_comment"]["author"]):
+                continue
             original = (s.get("title", "") + "\n\n" + s.get("selftext", "")).strip()
+            split = split_of(r["submission_id"])
             for key, label in (("delta_comment", 1), ("nodelta_comment", 0)):
                 reply = "\n\n".join(c.get("body", "") for c in r[key]["comments"]).strip()
-                originals.append(original)
-                replies.append(reply)
-                labels.append(label)
-    ds = Dataset.from_dict({"original": originals, "reply": replies, "label": labels})
-    # ClassLabel gives the Hub nice label names.
-    return ds.cast_column("label", ClassLabel(names=["nodelta", "delta"]))
+                rows.append({"original": original, "reply": reply, "label": label,
+                             "pair_id": pair_id, "post_id": r["submission_id"], "split": split})
+    return {"cmv": to_splits(rows, ["nodelta", "delta"])}
 
 def build_ddo(path, limit=None):
-    """debate.org debates.json -> {original, reply, label}, two rows per decided debate.
+    """debate.org debates.json -> {original, reply, label, debate_id}, two rows per decided debate.
+
+    Both sides of a debate land in the same split.
     """
-    originals, replies, labels = [], [], []
+    rows = []
     with open(path) as fh:
-        for i, (_id, d) in enumerate(ijson.kvitems(fh, "")):
+        for i, (debate_id, d) in enumerate(ijson.kvitems(fh, "")):
             if limit is not None and i >= limit:
                 break
             if d.get("forfeit_label"):
@@ -57,15 +88,13 @@ def build_ddo(path, limit=None):
                 reply = "\n\n".join(by_side[side]).strip()
                 if not reply:
                     continue  # side never spoke
-                originals.append(resolution)
-                replies.append(reply)
-                labels.append(1 if status[side] == "Winning" else 0)
-
-    ds = Dataset.from_dict({"original": originals, "reply": replies, "label": labels})
-    return ds.cast_column("label", ClassLabel(names=["lost", "won"]))
+                rows.append({"original": resolution, "reply": reply,
+                             "label": 1 if status[side] == "Winning" else 0,
+                             "debate_id": debate_id, "split": split_of(debate_id)})
+    return {"ddo": to_splits(rows, ["lost", "won"])}
 
 SOURCES = {
-    "cmv": ("cmv/pairs.jsonl", build_pairs),
+    "cmv": ("cmv/pairs.jsonl", build_cmv),
     "ddo": ("ddo/debates.json", build_ddo),
 }
 
@@ -82,22 +111,18 @@ def main():
     token = os.environ.get("HF_TOKEN")
     if not args.dry_run:
         login(token=token)
-    for name in args.sources:
-        path, builder = SOURCES[name]
-        ds = builder(path)
-        pos = sum(ds["label"])
-        print(f"[{name}] built {len(ds)} rows ({pos} positive / {len(ds) - pos} negative)")
-
-        tt = ds.train_test_split(test_size=TEST_SIZE, seed=SEED, stratify_by_column="label")
-        val_rel = VAL_SIZE / (1 - TEST_SIZE)  # validation as a fraction of the remaining data
-        tv = tt["train"].train_test_split(test_size=val_rel, seed=SEED, stratify_by_column="label")
-
-        dsd = DatasetDict(train=tv["train"], validation=tv["test"], test=tt["test"])
-        print(f"[{name}] split -> " + ", ".join(f"{k}={len(v)}" for k, v in dsd.items()))
-        if not args.dry_run:
-            dsd.push_to_hub(REPO, config_name=name, private=True, token=token, revision=args.revision)
-            print(f"[{name}] pushed -> https://huggingface.co/datasets/{REPO}/tree/{args.revision} "
-                  f"(config: {name}, branch: {args.revision}, private)")
+    for source in args.sources:
+        path, builder = SOURCES[source]
+        for name, dsd in builder(path).items():
+            names = dsd["train"].features["label"].names
+            for split, ds in dsd.items():
+                counts = Counter(ds["label"])
+                print(f"[{name}] {split:10s} {len(ds):7d} rows  "
+                      + ", ".join(f"{n}={counts[i]}" for i, n in enumerate(names)))
+            if not args.dry_run:
+                dsd.push_to_hub(REPO, config_name=name, private=True, token=token, revision=args.revision)
+                print(f"[{name}] pushed -> https://huggingface.co/datasets/{REPO}/tree/{args.revision} "
+                      f"(config: {name}, branch: {args.revision}, private)")
 
 if __name__ == "__main__":
     main()
