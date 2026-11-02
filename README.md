@@ -36,7 +36,7 @@ python create_dataset.py
 # train on a config, save model locally
 python train_delta.py --dataset-config cmv
 
-# train and push a model
+# train and push to the private repo nlp-final-project11/nlp-project-modernbert-<config>
 python train_delta.py --dataset-config ddo --push
 
 # fast end-to-end pipeline check
