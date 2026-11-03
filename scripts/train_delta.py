@@ -35,6 +35,7 @@ def parse_args():
     ap.add_argument("--dataset-revision", default=DATASET_REVISION, help="branch of the dataset repo to load (default: %(default)s)")
     ap.add_argument("--push", action="store_true", help=f"push the model to a private repo, {MODEL_REPO}-<config>")
     ap.add_argument("--smoke", action="store_true", help="tiny/fast pipeline check")
+    ap.add_argument("--fp32", action="store_true", help="train in fp32 (the T1 baseline was fp32); default is bf16 mixed precision when the GPU supports it")
     ap.add_argument("--freeze", action="store_true", help="freeze the encoder, train only the classifier head (cheap, lower accuracy)")
     return ap.parse_args()
 
@@ -133,6 +134,8 @@ def main():
         print("[FREEZE] encoder frozen; training classifier head only")
 
     collator = DataCollatorWithPadding(tokenizer=tok)
+    use_bf16 = not args.fp32 and torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    print(f"[PRECISION] {'bf16 mixed precision' if use_bf16 else 'fp32'}")
     # smoke runs get their own dir so a real run never resumes from a smoke checkpoint
     outputdir = f"outputs/{args.dataset_config}" + ("-smoke" if args.smoke else "")
     model_repo = f"{MODEL_REPO}-{args.dataset_config}"
@@ -144,6 +147,7 @@ def main():
         num_train_epochs=epochs,
         max_steps=max_steps,
         learning_rate=LR,
+        bf16=use_bf16,
         eval_strategy="steps",
         eval_steps=save_steps,
         save_strategy="steps",
@@ -174,6 +178,8 @@ def main():
     if resume:
         print(f"[RESUME] continuing from {resume}")
     trainer.train(resume_from_checkpoint=resume)
+    if torch.cuda.is_available():  # peak over this process, to size future runs
+        print(f"[VRAM] peak allocated {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB, reserved {torch.cuda.max_memory_reserved() / 2**30:.1f} GiB")
 
     pred = trainer.predict(ds["test"])
     metrics = {k[5:]: v for k, v in pred.metrics.items() if k.startswith("test_")}
