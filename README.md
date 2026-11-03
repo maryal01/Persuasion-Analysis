@@ -32,32 +32,32 @@ Authenticate once (needed for private dataset repos). Create a write token at
 export HF_TOKEN=hf_xxx
 ```
 
-## 1. Build & publish the datasets — `create_dataset.py`
+## 1. Build & publish the datasets — `scripts/create_dataset.py`
 Raw inputs (gitignored), relative to the project root:
 - `cmv/pairs.jsonl` — decompressed `pairs.jsonl.bz2` from [Webis-CMV-20](https://zenodo.org/records/3778298)
 - `ddo/debates.json` — from the DDO corpus
 
 ```bash
 # build and print split/label counts without pushing
-python create_dataset.py --dry-run
+python scripts/create_dataset.py --dry-run
 
 # build and push every config (or one source: --sources cmv)
-python create_dataset.py
+python scripts/create_dataset.py
 ```
 
 Pushes go to the `t1-t2` branch of the dataset repo, which is created on first
 push, so the shared `main` branch is left alone. Pass `--revision main` to publish there.
 
-## 2. Fine-tune & publish the model — `train_delta.py`
+## 2. Fine-tune & publish the model — `scripts/train_delta.py`
 ```bash
 # train on a config, save model locally
-python train_delta.py --dataset-config cmv
+python scripts/train_delta.py --dataset-config cmv
 
 # train and push to the private repo nlp-final-project11/nlp-project-modernbert-<config>
-python train_delta.py --dataset-config ddo_switch --push
+python scripts/train_delta.py --dataset-config ddo_switch --push
 
 # fast end-to-end pipeline check
-python train_delta.py --smoke
+python scripts/train_delta.py --smoke
 ```
 
 Data is loaded from the `t1-t2` branch by default; `--dataset-revision main`
@@ -71,9 +71,9 @@ share of pairs whose delta reply scores higher than its no-delta reply.
 Runs save a checkpoint every 500 steps and resume from the newest one in
 `outputs/<config>/`; delete that directory to start over.
 
-## 3. Train on Gilbreth — `train.sub`
+## 3. Train on Gilbreth — `jobs/train.sub`
 Clone the repo onto scratch, then create the environment at `$RCAC_SCRATCH/persuasion-env`
-with the `conda` module, as RCAC recommends; the commands are in the header of `train.sub`.
+with the `conda` module, as RCAC recommends; the commands are in the header of `jobs/train.sub`.
 That header also shows how to submit, and how to chain several 4-hour standby jobs into
 one longer run.
 

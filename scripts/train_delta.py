@@ -17,7 +17,7 @@ from transformers import (
 )
 
 DATASET_REPO = "nlp-final-project11/persuasion-datasets"
-DATASET_REVISION = "t1-t2"  # Hub branch holding the T1/T2 configs built by create_dataset.py
+DATASET_REVISION = "t1-t2"  # Hub branch holding the T1/T2 configs built by scripts/create_dataset.py
 MODEL_NAME = "answerdotai/ModernBERT-base" 
 MODEL_REPO = "nlp-final-project11/nlp-project-modernbert"  # pushed to {MODEL_REPO}-{config}
 MAX_LENGTH = 4096
