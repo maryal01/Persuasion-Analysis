@@ -26,14 +26,15 @@ Training runs on Purdue RCAC Gilbreth (`train.sub`). Hugging Face org `nlp-final
 
 ```
 README.md  RESULTS.md  requirements.txt  AGENTS.md  CLAUDE.md
-scripts/      commands you run (build datasets, train, evaluate)
+scripts/      commands you run, one folder per task: t1_t2/, t3/, t4/, t5/ (+ common/ for code shared by tasks)
 jobs/         Slurm files (train.sub)
 analysis/     one folder per analysis: <YYYY-MM-DD>_<name>/ with a README.md
 notebooks/    exploration only
 ```
 
 - No loose scripts in the repo root; put new files in one of the folders above.
-- The task is a CLI argument (`--dataset-config`), not a copied script. Splits are grouped (by post / debate; by person for T3/T5) and use one shared split function.
+- Scripts live in the folder of their task (`scripts/t5/build_dataset.py`, `scripts/t5/train.py`, ...); code used by several tasks goes to `scripts/common/` instead of being copied. The T1/T2 scripts (`create_dataset.py`, `train_delta.py`) still sit directly in `scripts/` and move to `scripts/t1_t2/` in a separate PR after the structure PR is merged.
+- Within a task, the dataset is a CLI argument (`--dataset-config`), not a copied script. Splits are grouped (by post / debate; by person for T3/T5) and use one shared split function.
 - Add a `src/` package and `tests/` once code is shared between several scripts.
 - An analysis README has a Status line and Goal, What it does, Run (exact command), Results, Notes. Outputs and data stay out of git. Say so when a statistic comes from a sample.
 - Results go into `RESULTS.md` (one row per finished run: numbers, seed, model repo, job id).
