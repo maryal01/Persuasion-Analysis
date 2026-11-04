@@ -1,10 +1,10 @@
 #!/bin/bash
 # FILENAME: train.sub
 # Slurm job for fine-tuning on Purdue's Gilbreth cluster. Submit from the repo root:
-#   sbatch -A <account> train.sub cmv
-#   sbatch -A <account> train.sub ddo_switch --push
-#   sbatch -A <account> -q normal -t 12:00:00 train.sub cmv   # if your account owns GPUs
-# Everything after the config name is passed through to train_delta.py.
+#   sbatch -A <account> jobs/train.sub cmv
+#   sbatch -A <account> jobs/train.sub ddo_switch --push
+#   sbatch -A <account> -q normal -t 12:00:00 jobs/train.sub cmv   # if your account owns GPUs
+# Everything after the config name is passed through to scripts/train_delta.py.
 # Run `slist` to see your accounts; standby (max 4h) works with any account.
 #
 # One-time setup on a login node (RCAC asks for the conda module, not anaconda):
@@ -15,8 +15,8 @@
 # Runs longer than one job: queue several parts up front. Each waits for the previous one
 # to end (afterany, since a time-limit kill counts as a failure), resumes from its last
 # checkpoint, and parts left over after training finishes exit immediately:
-#   jid=$(sbatch --parsable -A <account> train.sub ddo_switch)
-#   for i in 1 2 3; do jid=$(sbatch --parsable -A <account> --dependency=afterany:$jid train.sub ddo_switch); done
+#   jid=$(sbatch --parsable -A <account> jobs/train.sub ddo_switch)
+#   for i in 1 2 3; do jid=$(sbatch --parsable -A <account> --dependency=afterany:$jid jobs/train.sub ddo_switch); done
 # If a part crashes, the remaining parts exit immediately too; fix the cause, delete
 # outputs/<config>/FAILED, and resubmit. To start a config over, delete outputs/<config>/.
 #SBATCH --job-name=persuasion
@@ -53,7 +53,7 @@ if ! $SMOKE && [[ -f $FAILED ]]; then
     exit 1
 fi
 
-# train_delta.py calls login(token=$HF_TOKEN); without it the job blocks on an interactive prompt.
+# scripts/train_delta.py calls login(token=$HF_TOKEN); without it the job blocks on an interactive prompt.
 : "${HF_TOKEN:?export HF_TOKEN in your shell before running sbatch}"
 
 # Home is capped at 25GB, so the env and HF cache live on scratch
@@ -64,7 +64,7 @@ PY=$RCAC_SCRATCH/persuasion-env/bin/python
 nvidia-smi
 # Stop rather than hold a GPU while training on CPU (RCAC tracks per-job GPU utilization).
 if ! "$PY" -c "import sys, torch; sys.exit(0 if torch.cuda.is_available() else 'torch cannot use the GPU')" \
-    || ! "$PY" train_delta.py --dataset-config "$CONFIG" "$@"; then
+    || ! "$PY" scripts/train_delta.py --dataset-config "$CONFIG" "$@"; then
     if ! $SMOKE; then
         mkdir -p "$(dirname "$FAILED")"
         touch "$FAILED"
