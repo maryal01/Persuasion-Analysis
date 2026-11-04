@@ -85,3 +85,23 @@ which RCAC logs. Scratch files untouched for 60 days are purged, so keep results
 ```bash
 read -rs HF_TOKEN && export HF_TOKEN
 ```
+
+## 4. T5: CMV malleability — `scripts/t5/`
+Predict whether the OP of a r/changemyview post awards a delta, from the post text and the OP's LIWC/Receptiviti features.
+Data: the `posts_malleability` and `author_liwc` files of Webis-CMV-20 ([Zenodo 3778298](https://zenodo.org/records/3778298)), referred to below as `<cmv_dir>`;
+`<out_dir>` is any folder outside the repository. Label = DeltaBot confirmed a delta under a comment of the OP; the post text is cleaned of the moderator footnote,
+`Edit:`/`Update:` paragraphs and delta symbols. Results and caveats are in `RESULTS.md`.
+
+```bash
+# 1. dataset (8,121 posts, split by OP; stdlib only)
+python scripts/t5/build_dataset.py --posts <cmv_dir>/posts_malleability.jsonl.bz2 --liwc <cmv_dir>/author_liwc.jsonl.bz2 --output-dir <out_dir>/t5_dataset
+
+# 2. logistic-regression baselines (CPU, ~10 min)
+python scripts/t5/baselines.py --data-dir <out_dir>/t5_dataset --output-dir <out_dir>/t5_baselines
+
+# 3. ModernBERT: post text only, or post text + author features (GPU; --smoke checks the pipeline on 16 posts)
+python scripts/t5/train.py --data-dir <out_dir>/t5_dataset --mode post_liwc --output-dir <out_dir>/t5_models --bf16
+
+# optional: read threads to check what the label means
+python scripts/t5/inspect_labels.py collect --posts <cmv_dir>/posts_malleability.jsonl.bz2 --output <out_dir>/label_samples/candidates.jsonl
+```
