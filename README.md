@@ -18,6 +18,18 @@ land in the same split (the two DDO configs share one assignment). On DDO, votes
 by the debaters themselves are dropped, and so are side-to-tie votes in
 `ddo_switch`. Empty turns and the placeholder text `forfeit` are removed from transcripts.
 
+T5 (will the OP award a delta, given their history?) uses two more configs, both split by OP:
+
+| Config | Rows | Columns |
+|--------|------|---------|
+| `cmv_malleability` | one per CMV post that was not removed and has a known author (41,714) | `original` (title + selftext), `label` (`delta` if DeltaBot confirmed a delta the OP awarded), `post_id`, `author`, `created_utc` |
+| `cmv_history` | every post and comment those OPs wrote in r/changemyview (1,684,662) | `author`, `kind` (`post`, `comment`, `own_thread_comment`), `created_utc`, `edited_utc`, `text` |
+
+The history of a post is the `cmv_history` rows of its `author` with `created_utc` before the post's
+and `edited_utc` null or before it. Apply both conditions: the stored text is the edited version, so a
+later edit can reveal the outcome. Histories are not truncated (21% of posts have more than about
+8,192 tokens of history; 39% have none). Delta symbols are removed from all text.
+
 ## Setup
 
 ```bash
@@ -36,6 +48,7 @@ export HF_TOKEN=hf_xxx
 Raw inputs (gitignored), relative to the project root:
 - `cmv/pairs.jsonl` — decompressed `pairs.jsonl.bz2` from [Webis-CMV-20](https://zenodo.org/records/3778298)
 - `ddo/debates.json` — from the DDO corpus
+- `cmv/threads.jsonl` — decompressed `threads.jsonl.bz2` from Webis-CMV-20 (3.6 GB; only for `--sources cmv_history`)
 
 ```bash
 # build and print split/label counts without pushing
@@ -43,6 +56,9 @@ python scripts/create_dataset.py --dry-run
 
 # build and push every config (or one source: --sources cmv)
 python scripts/create_dataset.py
+
+# T5 configs only (about 2 minutes, 2.5 GB of memory)
+python scripts/create_dataset.py --sources cmv_history
 ```
 
 Pushes go to the `t1-t2` branch of the dataset repo, which is created on first
