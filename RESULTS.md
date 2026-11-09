@@ -34,6 +34,24 @@ rather than pairwise: word count 51.9%, Tan et al.'s best text features 57.8%, t
 debater traits 61.1%. Their metric differs from ours, so don't compare the numbers directly.
 Tan et al. (2016)'s 65.1% is on a different corpus.
 
+**Link sensitivity** (same model, no retraining; 399 of 2,038 test replies contain a URL). All CIs
+resample whole posts.
+
+- **Observational:** pairwise accuracy is 83.1% [77.3, 88.6] when only the delta reply has a URL
+  (172 pairs) and 41.2% [31.2, 51.5] when only the no-delta reply has one (97 pairs). Link presence is
+  confounded with length: the reply with the link is usually the longer one.
+- **Controlled edits:** replacing each URL with `URL`, or deleting it, lowers the reply's score
+  (logit delta − logit no-delta). Placeholder: −0.12 [−0.14, −0.11]; deletion: −0.16 [−0.18, −0.14].
+  The drop is the same for delta and no-delta replies.
+  - With URLs removed, the gap between those two groups shrinks from 41.9 to 14.1 points
+    (69.8% vs. 55.7%).
+  - Overall pairwise accuracy barely moves: −0.7 [−1.8, +0.5] (placeholder) and −1.1 [−2.3, +0.2]
+    (deletion).
+- The edits also shorten replies (by about 64–71 tokens on average), so URL effects and length effects
+  aren't separated. These results describe the model's sensitivity, not effects on human persuasion.
+  One model, one seed.
+- Details: `analysis/2026-11-09_cmv-link-bias/README.md`. Script: `scripts/t1_t2/evaluate_cmv_links.py`.
+
 ## T2: DDO voter switching (`ddo_switch`, `ddo_undecided`)
 
 Not trained yet.
