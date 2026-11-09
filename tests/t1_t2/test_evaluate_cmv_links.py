@@ -132,13 +132,13 @@ class CategoryAndStatsTest(unittest.TestCase):
     def test_paired_change_bootstrap_zero_when_no_change(self):
         clusters = list("aabbcc")
         before = np.array([1, 0, 1, 1, 0, 0.5])
-        boot = lk.ecl.cluster_bootstrap_means(clusters, {"chg": before - before}, n_boot=200, seed=0)
+        boot = lk.cb.cluster_bootstrap_means(clusters, {"chg": before - before}, n_boot=200, seed=0)
         self.assertTrue(np.allclose(boot["chg"], 0))
 
     def test_pair_flip_logic(self):
         # pair correct before (delta 1.0 > nodelta 0.5); removing delta's URL lowers it to 0.2 -> flip
-        before = lk.ecl.win_score([1.0], [0.5])
-        after = lk.ecl.win_score([0.2], [0.5])
+        before = lk.cb.win_score([1.0], [0.5])
+        after = lk.cb.win_score([0.2], [0.5])
         self.assertEqual((before[0], after[0]), (1.0, 0.0))
 
 

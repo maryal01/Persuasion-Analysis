@@ -135,7 +135,7 @@ class StatsTest(unittest.TestCase):
 
     def test_paired_difference_zero_for_identical_models(self):
         win = np.array([1, 0, 1, 1, 0.5, 0])
-        boot = ro.ecl.cluster_bootstrap_means(list("aabbcc"), {"diff": win - win}, n_boot=100, seed=0)
+        boot = ro.cb.cluster_bootstrap_means(list("aabbcc"), {"diff": win - win}, n_boot=100, seed=0)
         self.assertTrue(np.allclose(boot["diff"], 0))
 
 

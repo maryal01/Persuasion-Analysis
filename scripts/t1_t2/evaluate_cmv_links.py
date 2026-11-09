@@ -4,7 +4,7 @@ Question: is the frozen model sensitive to URL presence or content, i.e. could l
 in its persuasion predictions? Two stages, both on the pinned `cmv` test split:
 
   observe    Experiment A (observational). Reuses the cached scores from
-             scripts/t1_t2/evaluate_cmv_length.py (outputs/cmv_length/predictions.csv). Groups pairs
+             scripts/t1_t2/cmv_baseline.py (outputs/cmv_length/predictions.csv). Groups pairs
              by which reply has a URL (neither / both / delta only / no-delta only), and reports pairwise
              accuracy with post-cluster bootstrap CIs, the joint view with length matching (word ratio
              >= 0.80), possible confounders per group, and the URL/label association in each split.
@@ -51,7 +51,7 @@ from typing import Sequence
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import evaluate_cmv_length as ecl  # noqa: E402  (pairing, bootstrap and scoring helpers)
+import cmv_baseline as cb  # noqa: E402  (pinned revisions, pairing, bootstrap and scoring helpers)
 
 PLACEHOLDER = "URL"
 URL_START = r"(?:https?://|www\.)"
@@ -198,7 +198,7 @@ def group_mean_replicates(clusters: Sequence[str], values: np.ndarray, member: n
     """Post-cluster bootstrap replicates of mean(values[member]) when the bootstrap resamples all
     clusters (so a group's size varies across replicates). nan where a replicate has no members."""
     member = np.asarray(member, float)
-    b = ecl.cluster_bootstrap_means(clusters, {"num": np.asarray(values, float) * member, "den": member},
+    b = cb.cluster_bootstrap_means(clusters, {"num": np.asarray(values, float) * member, "den": member},
                                     n_boot, seed)
     with np.errstate(invalid="ignore", divide="ignore"):
         return np.where(b["den"] > 0, b["num"] / np.where(b["den"] > 0, b["den"], 1), np.nan)
@@ -206,7 +206,7 @@ def group_mean_replicates(clusters: Sequence[str], values: np.ndarray, member: n
 
 def nan_ci(replicates: np.ndarray) -> tuple[float, float]:
     r = replicates[~np.isnan(replicates)]
-    return ecl.percentile_ci(r) if len(r) else (float("nan"), float("nan"))
+    return cb.percentile_ci(r) if len(r) else (float("nan"), float("nan"))
 
 
 # --------------------------------------------------------------------------------------------
@@ -214,12 +214,12 @@ def nan_ci(replicates: np.ndarray) -> tuple[float, float]:
 # --------------------------------------------------------------------------------------------
 
 def load_test_with_cache(cache_dir: Path):
-    """Test split at the revision recorded by Experiment 1, its cached scores, and verified pairs."""
+    """Test split at the revision recorded by cmv_baseline.py, its cached scores, and verified pairs."""
     from datasets import load_dataset
     meta = json.loads((cache_dir / "reproduction.json").read_text())
     if not meta.get("passed"):
-        raise SystemExit(f"[STOP] {cache_dir}/reproduction.json did not pass; rerun evaluate_cmv_length.py predict")
-    test = load_dataset(ecl.DATASET_REPO, ecl.DATASET_CONFIG, revision=meta["dataset"]["revision"], split="test")
+        raise SystemExit(f"[STOP] {cache_dir}/reproduction.json did not pass; rerun scripts/t1_t2/cmv_baseline.py")
+    test = load_dataset(cb.DATASET_REPO, cb.DATASET_CONFIG, revision=meta["dataset"]["revision"], split="test")
     replies, originals = list(test["reply"]), list(test["original"])
     labels, pair_ids, post_ids = list(test["label"]), list(test["pair_id"]), list(test["post_id"])
     delta_id = int({k.lower(): v for k, v in meta["model"]["label2id"].items()}["delta"])
@@ -231,7 +231,7 @@ def load_test_with_cache(cache_dir: Path):
         if (int(rec["pair_id"]) != pair_ids[row] or int(rec["label"]) != labels[row]
                 or int(rec["reply_chars"]) != len(replies[row]) or int(rec["reply_words"]) != len(replies[row].split())):
             raise SystemExit(f"[STOP] cached row {row} does not match the dataset")
-    pairs = ecl.build_pairs(pair_ids, post_ids, labels, delta_label=delta_id)
+    pairs = cb.build_pairs(pair_ids, post_ids, labels, delta_label=delta_id)
     return meta, test, originals, replies, cached, pairs, delta_id
 
 
@@ -248,9 +248,9 @@ def pair_arrays(pairs, cached, replies) -> dict[str, np.ndarray]:
         t[f"{side}_n_urls"] = np.array([len(s) for s in spans], float)
         t[f"{side}_has_url"] = t[f"{side}_n_urls"] > 0
     t["category"] = np.array([link_category(a, b) for a, b in zip(t["d_has_url"], t["n_has_url"])])
-    t["model_win"] = ecl.win_score(t["d_score"], t["n_score"])
-    t["longer_win"] = ecl.win_score(t["d_reply_words"], t["n_reply_words"])
-    t["word_ratio"] = ecl.length_ratio(t["d_reply_words"], t["n_reply_words"])
+    t["model_win"] = cb.win_score(t["d_score"], t["n_score"])
+    t["longer_win"] = cb.win_score(t["d_reply_words"], t["n_reply_words"])
+    t["word_ratio"] = cb.length_ratio(t["d_reply_words"], t["n_reply_words"])
     return t
 
 
@@ -260,10 +260,10 @@ def acc_row(name: str, mask: np.ndarray, t: dict, n_boot: int, seed: int) -> dic
     if not row["pairs"]:
         return row
     m, b = t["model_win"][mask], t["longer_win"][mask]
-    boot = ecl.cluster_bootstrap_means(t["post_id"][mask], {"m": m, "b": b, "d": m - b}, n_boot, seed)
-    row.update(model_acc=float(m.mean()), model_ci=ecl.percentile_ci(boot["m"]),
-               longer_acc=float(b.mean()), longer_ci=ecl.percentile_ci(boot["b"]),
-               diff=float(m.mean() - b.mean()), diff_ci=ecl.percentile_ci(boot["d"]))
+    boot = cb.cluster_bootstrap_means(t["post_id"][mask], {"m": m, "b": b, "d": m - b}, n_boot, seed)
+    row.update(model_acc=float(m.mean()), model_ci=cb.percentile_ci(boot["m"]),
+               longer_acc=float(b.mean()), longer_ci=cb.percentile_ci(boot["b"]),
+               diff=float(m.mean() - b.mean()), diff_ci=cb.percentile_ci(boot["d"]))
     return row
 
 
@@ -352,7 +352,7 @@ def run_observe(args: argparse.Namespace) -> int:
     split_rates = {}
     revision = meta["dataset"]["revision"]
     for split in ("train", "validation", "test"):
-        ds = load_dataset(ecl.DATASET_REPO, ecl.DATASET_CONFIG, revision=revision, split=split)
+        ds = load_dataset(cb.DATASET_REPO, cb.DATASET_CONFIG, revision=revision, split=split)
         has = np.array([bool(find_url_spans(r)) for r in ds["reply"]])
         lab = np.array(list(ds["label"]))
         split_rates[split] = {"replies": int(len(lab)),
@@ -429,21 +429,21 @@ def run_intervene(args: argparse.Namespace) -> int:
           f"and contains no detected URL")
 
     rev = meta["model"]["revision"]
-    tok = AutoTokenizer.from_pretrained(ecl.MODEL_REPO, revision=rev)
-    model = AutoModelForSequenceClassification.from_pretrained(ecl.MODEL_REPO, revision=rev, dtype=torch.float32).eval()
+    tok = AutoTokenizer.from_pretrained(cb.MODEL_REPO, revision=rev)
+    model = AutoModelForSequenceClassification.from_pretrained(cb.MODEL_REPO, revision=rev, dtype=torch.float32).eval()
     label2id = {k.lower(): int(v) for k, v in model.config.label2id.items()}
     label_ids = (label2id["nodelta"], label2id["delta"])
-    device = ecl.pick_device(args.device)
+    device = cb.pick_device(args.device)
     model.to(device)
     print(f"[DEVICE] {device}")
 
     t0 = time.time()
-    rescored = ecl.score_rows(model, tok, originals, replies, url_rows, device, label_ids)
+    rescored = cb.score_rows(model, tok, originals, replies, url_rows, device, label_ids)
     repro_diff = max(abs((d - n) - float(cached[r]["score"])) for r, (n, d, _) in rescored.items())
     print(f"[CHECK] unedited URL replies rescored: max |score - cached| = {repro_diff:.2e}")
     if repro_diff > REPRO_TOLERANCE:
         raise SystemExit(f"[STOP] original predictions not reproduced (tolerance {REPRO_TOLERANCE})")
-    edited_scores = {v: ecl.score_rows(model, tok, originals, variants[v], url_rows, device, label_ids) for v in VARIANTS}
+    edited_scores = {v: cb.score_rows(model, tok, originals, variants[v], url_rows, device, label_ids) for v in VARIANTS}
     elapsed = time.time() - t0
 
     def n_tokens(text_list: list[str], rows: list[int]) -> dict[int, int]:
@@ -492,7 +492,7 @@ def run_intervene(args: argparse.Namespace) -> int:
         side_diff = (group_mean_replicates(clusters, change, is_delta, n_boot, seed)
                      - group_mean_replicates(clusters, change, ~is_delta, n_boot, seed))
         res["delta_minus_nodelta"] = {"diff": float(change[is_delta].mean() - change[~is_delta].mean()), "ci": nan_ci(side_diff)}
-        res["spearman_change_vs_tokens_removed"] = ecl.spearman(change, removed)
+        res["spearman_change_vs_tokens_removed"] = cb.spearman(change, removed)
         res["share_score_decreased"] = float((change < 0).mean())
         b1[v] = res
     metrics["reply_level"] = b1
@@ -507,7 +507,7 @@ def run_intervene(args: argparse.Namespace) -> int:
 
     # B2. pair level: accuracy change and preference flips, per scenario
     d_row, n_row = t["d_row"], t["n_row"]
-    win_before = ecl.win_score(base[d_row], base[n_row])
+    win_before = cb.win_score(base[d_row], base[n_row])
     gap_before = base[d_row] - base[n_row]
     b2, flip_records = {}, []
     md += ["### B2. Pairwise accuracy after editing (paired post-cluster bootstrap)", "",
@@ -520,15 +520,15 @@ def run_intervene(args: argparse.Namespace) -> int:
             affected = {"edit all URL replies": t["d_has_url"] | t["n_has_url"],
                         "edit delta reply only": t["d_has_url"],
                         "edit no-delta reply only": t["n_has_url"]}[scen]
-            win_after = ecl.win_score(d_s, n_s)
+            win_after = cb.win_score(d_s, n_s)
             gap_after = d_s - n_s
             flip = np.sign(gap_after) != np.sign(gap_before)
             res = {}
             for subset, m in (("all pairs", np.ones(len(pairs), bool)), ("affected pairs", affected)):
-                boot = ecl.cluster_bootstrap_means(t["post_id"][m], {"chg": win_after[m] - win_before[m]}, n_boot, seed)
+                boot = cb.cluster_bootstrap_means(t["post_id"][m], {"chg": win_after[m] - win_before[m]}, n_boot, seed)
                 res[subset] = {"pairs": int(m.sum()), "acc_before": float(win_before[m].mean()),
                                "acc_after": float(win_after[m].mean()),
-                               "change": float((win_after[m] - win_before[m]).mean()), "change_ci": ecl.percentile_ci(boot["chg"]),
+                               "change": float((win_after[m] - win_before[m]).mean()), "change_ci": cb.percentile_ci(boot["chg"]),
                                "flips": int(flip[m].sum()), "correct_to_wrong": int((flip & (win_before == 1))[m].sum()),
                                "wrong_to_correct": int((flip & (win_before == 0))[m].sum())}
                 r = res[subset]
@@ -540,9 +540,9 @@ def run_intervene(args: argparse.Namespace) -> int:
                 cat_rows = {}
                 for c in CATEGORIES[1:]:
                     m = t["category"] == c
-                    boot = ecl.cluster_bootstrap_means(t["post_id"][m], {"chg": win_after[m] - win_before[m]}, n_boot, seed)
+                    boot = cb.cluster_bootstrap_means(t["post_id"][m], {"chg": win_after[m] - win_before[m]}, n_boot, seed)
                     cat_rows[c] = {"pairs": int(m.sum()), "acc_before": float(win_before[m].mean()),
-                                   "acc_after": float(win_after[m].mean()), "change_ci": ecl.percentile_ci(boot["chg"]),
+                                   "acc_after": float(win_after[m].mean()), "change_ci": cb.percentile_ci(boot["chg"]),
                                    "flips": int(flip[m].sum()),
                                    "correct_to_wrong": int((flip & (win_before == 1))[m].sum()),
                                    "wrong_to_correct": int((flip & (win_before == 0))[m].sum())}
@@ -581,7 +581,7 @@ def run_intervene(args: argparse.Namespace) -> int:
 
     if args.export_flip_text and flip_records:
         target = out_dir / "flips_text.jsonl"
-        if not ecl.is_git_ignored(target):
+        if not cb.is_git_ignored(target):
             print(f"[STOP] {target} is not git-ignored; refusing to write private text there")
             return 2
         by_id = {p.pair_id: p for p in pairs}
@@ -610,7 +610,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                             ("intervene", "Experiment B: score URL-edited replies")):
         p = sub.add_parser(name, help=help_text)
         p.add_argument("--out-dir", default="outputs/cmv_links", help="git-ignored output directory (default: %(default)s)")
-        p.add_argument("--cache-dir", default="outputs/cmv_length", help="Experiment 1 outputs, read only (default: %(default)s)")
+        p.add_argument("--cache-dir", default="outputs/cmv_length", help="cached baseline scores from cmv_baseline.py, read only (default: %(default)s)")
         p.add_argument("--n-boot", type=int, default=10000, help="post-cluster bootstrap resamples (default: %(default)s)")
         p.add_argument("--seed", type=int, default=577, help="bootstrap seed (default: %(default)s)")
         if name == "intervene":
@@ -618,7 +618,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             p.add_argument("--export-flip-text", action="store_true", help="write flipped pairs' text (git-ignored dir only)")
     args = ap.parse_args(argv)
     if Path(args.out_dir).resolve() == Path(args.cache_dir).resolve():
-        ap.error("--out-dir must differ from --cache-dir (Experiment 1 outputs are read only)")
+        ap.error("--out-dir must differ from --cache-dir (the cached baseline scores are read only)")
     return args
 
 

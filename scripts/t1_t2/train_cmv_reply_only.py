@@ -13,7 +13,7 @@ Stages (run in order):
             by --select-metric, and save it to <out-dir>/final. Never touches the test split.
   evaluate  Score the test split once with the selected model, report pairwise accuracy / AUROC /
             row accuracy / F1 with 95% post-cluster bootstrap CIs, and the paired difference to the
-            published original+reply model (cached scores from evaluate_cmv_length.py).
+            published original+reply model (cached scores from cmv_baseline.py).
 
 Usage:
   python scripts/t1_t2/train_cmv_reply_only.py train --smoke         # tiny subset, 4 optimizer steps
@@ -53,13 +53,13 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import train_delta as td  # noqa: E402  (team metrics, loss, resume helper and hyperparameters)
-import evaluate_cmv_length as ecl  # noqa: E402  (pinned revisions, pairing, cluster bootstrap)
+import cmv_baseline as cb  # noqa: E402  (pinned revisions, pairing, bootstrap and scoring helpers)
 
 # Published run (train_delta.py @ bf53e36, Gilbreth A100, transformers 5.20.1). The values below are
 # read from train_delta.py where they still match; select_metric differs from today's code.
 BASELINE = {
     "base_model": td.MODEL_NAME,
-    "dataset_revision": ecl.DATASET_REVISION,  # t1-t2 head; unchanged since before the published run
+    "dataset_revision": cb.DATASET_REVISION,  # t1-t2 head; unchanged since before the published run
     "max_length": td.MAX_LENGTH,
     "per_device_batch": td.BATCH_SIZE,
     "grad_accum": td.GRAD_ACCUM,
@@ -92,7 +92,7 @@ def check_splits(splits: dict[str, tuple[Sequence[int], Sequence[str], Sequence[
     (one delta + one no-delta row, same post), and no post or pair may appear in two splits."""
     summary, posts, pairs = {}, {}, {}
     for name, (pair_ids, post_ids, labels) in splits.items():
-        built = ecl.build_pairs(pair_ids, post_ids, labels, delta_label=delta_label)  # raises if malformed
+        built = cb.build_pairs(pair_ids, post_ids, labels, delta_label=delta_label)  # raises if malformed
         posts[name], pairs[name] = set(post_ids), {p.pair_id for p in built}
         summary[name] = {"rows": len(labels), "pairs": len(built), "posts": len(posts[name])}
     names = list(splits)
@@ -180,7 +180,7 @@ class PeakMemoryMonitor:
 
 def load_splits(revision: str):
     from datasets import load_dataset
-    return load_dataset(ecl.DATASET_REPO, ecl.DATASET_CONFIG, revision=revision)
+    return load_dataset(cb.DATASET_REPO, cb.DATASET_CONFIG, revision=revision)
 
 
 def apply_smoke(ds, tok, seed: int):
@@ -379,7 +379,7 @@ def run_evaluate(args: argparse.Namespace) -> int:
     pair_ids, post_ids, labels = list(test["pair_id"]), list(test["post_id"]), np.array(list(test["label"]))
     model = AutoModelForSequenceClassification.from_pretrained(str(final_dir), dtype=torch.float32)
     delta_id = {k.lower(): int(v) for k, v in model.config.label2id.items()}["delta"]
-    pairs = ecl.build_pairs(pair_ids, post_ids, labels, delta_label=delta_id)
+    pairs = cb.build_pairs(pair_ids, post_ids, labels, delta_label=delta_id)
     tokenized = test.map(make_reply_only_tokenize(tok, settings["max_length"]), batched=True,
                          remove_columns=["original", "reply"]).rename_column("label", "labels")
     trainer = Trainer(model=model, args=TrainingArguments(output_dir=str(out_dir / "eval_tmp"), report_to="none",
@@ -406,9 +406,9 @@ def run_evaluate(args: argparse.Namespace) -> int:
     d_rows = np.array([p.delta_row for p in pairs])
     n_rows = np.array([p.nodelta_row for p in pairs])
     pair_posts = np.array([p.post_id for p in pairs])
-    new_win = ecl.win_score(scores[d_rows], scores[n_rows])
-    base_win = ecl.win_score(base_scores[d_rows], base_scores[n_rows])
-    boot = ecl.cluster_bootstrap_means(pair_posts, {"new": new_win, "base": base_win, "diff": new_win - base_win},
+    new_win = cb.win_score(scores[d_rows], scores[n_rows])
+    base_win = cb.win_score(base_scores[d_rows], base_scores[n_rows])
+    boot = cb.cluster_bootstrap_means(pair_posts, {"new": new_win, "base": base_win, "diff": new_win - base_win},
                                        args.n_boot, args.seed)
     row_reps = {k: [] for k in ("accuracy", "f1", "auroc", "auroc_base", "auroc_diff")}
     for idx in cluster_bootstrap_indices(post_ids, args.n_boot_rows, args.seed):
@@ -418,22 +418,22 @@ def run_evaluate(args: argparse.Namespace) -> int:
             row_reps[k].append(m[k])
         row_reps["auroc_base"].append(mb)
         row_reps["auroc_diff"].append(m["auroc"] - mb)
-    ci = lambda v: ecl.percentile_ci(np.array(v)[~np.isnan(np.array(v))])
+    ci = lambda v: cb.percentile_ci(np.array(v)[~np.isnan(np.array(v))])
     own = row_metrics(scores, is_delta)
     both = {"both correct": int(((new_win == 1) & (base_win == 1)).sum()), "reply-only only": int(((new_win == 1) & (base_win == 0)).sum()),
             "original+reply only": int(((new_win == 0) & (base_win == 1)).sum()), "both wrong": int(((new_win == 0) & (base_win == 0)).sum())}
     result = {
         "smoke": args.smoke, "test_pairs": len(pairs), "test_rows": len(labels), "test_posts": len(set(post_ids)),
         "team_metrics": team,
-        "pairwise_acc": {"value": float(new_win.mean()), "ci": ecl.percentile_ci(boot["new"])},
+        "pairwise_acc": {"value": float(new_win.mean()), "ci": cb.percentile_ci(boot["new"])},
         "auroc": {"value": own["auroc"], "ci": ci(row_reps["auroc"])},
         "row_accuracy": {"value": own["accuracy"], "ci": ci(row_reps["accuracy"])},
         "f1_delta": {"value": own["f1"], "ci": ci(row_reps["f1"]), "precision": own["precision"], "recall": own["recall"]},
         "share_predicted_delta": float((scores > 0).mean()),
-        "baseline": {"model": ecl.MODEL_REPO, "pairwise_acc": float(base_win.mean()), "pairwise_ci": ecl.percentile_ci(boot["base"]),
+        "baseline": {"model": cb.MODEL_REPO, "pairwise_acc": float(base_win.mean()), "pairwise_ci": cb.percentile_ci(boot["base"]),
                      "auroc": td.binary_auroc(base_scores, is_delta), "auroc_ci": ci(row_reps["auroc_base"])},
         "paired_difference_reply_only_minus_baseline": {
-            "pairwise_acc": float(new_win.mean() - base_win.mean()), "pairwise_ci": ecl.percentile_ci(boot["diff"]),
+            "pairwise_acc": float(new_win.mean() - base_win.mean()), "pairwise_ci": cb.percentile_ci(boot["diff"]),
             "auroc": own["auroc"] - td.binary_auroc(base_scores, is_delta), "auroc_ci": ci(row_reps["auroc_diff"]),
             "pair_agreement": both},
         "n_boot_pairs": args.n_boot, "n_boot_rows": args.n_boot_rows, "seed": args.seed,
@@ -451,7 +451,7 @@ def run_evaluate(args: argparse.Namespace) -> int:
 
     p, b, d = result["pairwise_acc"], result["baseline"], result["paired_difference_reply_only_minus_baseline"]
     print(f"\n=== TEST ({'SMOKE subset' if args.smoke else 'official held-out split'}: {len(pairs)} pairs, {len(set(post_ids))} posts) ===")
-    print(f"  reply-only pairwise acc : {100 * p['value']:.2f}%  95% CI {ecl.percentile_ci(boot['new'])}")
+    print(f"  reply-only pairwise acc : {100 * p['value']:.2f}%  95% CI {cb.percentile_ci(boot['new'])}")
     print(f"  reply-only AUROC        : {result['auroc']['value']:.4f}  95% CI {result['auroc']['ci']}")
     print(f"  row accuracy / F1(delta): {result['row_accuracy']['value']:.4f} / {result['f1_delta']['value']:.4f}")
     print(f"  original+reply (cached) : pairwise {100 * b['pairwise_acc']:.2f}%, AUROC {b['auroc']:.4f}")
@@ -470,7 +470,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     t = sub.add_parser("train", help="fine-tune reply-only ModernBERT; validation-based selection")
     t.add_argument("--out-dir", default="outputs/cmv_reply_only", help="git-ignored; smoke/ and full/ inside (default: %(default)s)")
     t.add_argument("--smoke", action="store_true", help="tiny subset (whole pairs, incl. the longest), 4 optimizer steps")
-    t.add_argument("--dataset-revision", default=ecl.DATASET_REVISION, help="pinned t1-t2 commit (default: %(default)s)")
+    t.add_argument("--dataset-revision", default=cb.DATASET_REVISION, help="pinned t1-t2 commit (default: %(default)s)")
     t.add_argument("--max-length", type=int, default=BASELINE["max_length"])
     t.add_argument("--per-device-batch", type=int, default=BASELINE["per_device_batch"])
     t.add_argument("--grad-accum", type=int, default=BASELINE["grad_accum"])

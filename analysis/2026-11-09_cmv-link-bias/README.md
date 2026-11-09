@@ -6,10 +6,10 @@ published model, one seed, test split only. No retraining.
 ## Goal
 
 Is the trained CMV classifier sensitive to URL presence or URL content, and could links be a
-superficial shortcut in its persuasion predictions? The length-controlled analysis
-(`analysis/2026-11-09_cmv-length-control/`) found 83.1% pairwise accuracy when only the delta reply
-has a link and 41.2% when only the no-delta reply has one. This analysis looks at that gap
-observationally (A) and tests it with controlled edits (B).
+superficial shortcut in its persuasion predictions? An exploratory breakdown of the published
+model's test predictions found 83.1% pairwise accuracy when only the delta reply has a link and
+41.2% when only the no-delta reply has one. This analysis looks at that gap observationally (A) and
+tests it with controlled edits (B).
 
 ## What it does
 
@@ -57,8 +57,8 @@ observationally (A) and tests it with controlled edits (B).
   - bare domains without a scheme or `www`, e.g. `example.com` (10 test replies mention one)
   - relative Reddit links such as `/r/…` and `](/u/…)` (3 replies)
   - URLs split by whitespace
-- Detection flags the same 399 replies as the rough regex used in the length analysis, so the four
-  link groups have the same sizes as there.
+- Detection flags the same 399 replies as the rough `n_links` regex cached by
+  `scripts/t1_t2/cmv_baseline.py`, so the four link groups have the same sizes either way.
 - **Edit verification** uses two checks; each one alone is sound. An edit passes if either passes:
   - a character diff whose changes must all lie inside URL spans
   - an alignment-free check: the text between spans must appear verbatim and in order, and each edited
@@ -75,8 +75,8 @@ python scripts/t1_t2/evaluate_cmv_links.py observe   --out-dir outputs/cmv_links
 python scripts/t1_t2/evaluate_cmv_links.py intervene --out-dir outputs/cmv_links  # ~3 min on M5 MPS
 ```
 
-Prerequisite: `outputs/cmv_length/` from `scripts/t1_t2/evaluate_cmv_length.py predict` (a passed
-reproduction). Outputs go to the git-ignored `outputs/cmv_links/` and contain ids and numbers only:
+Prerequisite: `outputs/cmv_length/` from `python scripts/t1_t2/cmv_baseline.py --out-dir outputs/cmv_length`
+(a passed reproduction of the published model). Outputs go to the git-ignored `outputs/cmv_links/` and contain ids and numbers only:
 `pairs.csv`, `url_replies.csv`, `flips.csv`, `*_metrics.json`, `*_summary.md`.
 `intervene --export-flip-text` also writes the flipped pairs' text to `flips_text.jsonl`, and refuses
 unless the target is git-ignored.
