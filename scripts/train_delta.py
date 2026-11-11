@@ -17,10 +17,9 @@ from transformers import (
 )
 
 DATASET_REPO = "nlp-final-project11/persuasion-datasets"
-DATASET_REVISION = "t1-t2"  # Hub branch holding the T1/T2 configs built by scripts/create_dataset.py
 MODEL_NAME = "answerdotai/ModernBERT-base" 
 MODEL_REPO = "nlp-final-project11/nlp-project-modernbert"  # pushed to {MODEL_REPO}-{config}
-MAX_LENGTH = 4096
+MAX_LENGTH = 8192  # the most ModernBERT reads
 BATCH_SIZE = 4
 GRAD_ACCUM = 8
 EPOCHS = 3
@@ -31,8 +30,10 @@ HF_TOKEN = os.environ.get("HF_TOKEN")
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Fine-tune ModernBERT on a persuasion dataset.")
-    ap.add_argument("--dataset-config", default = "cmv", help="dataset config/subset name (cmv, ddo_switch, ddo_undecided); omit for default")
-    ap.add_argument("--dataset-revision", default=DATASET_REVISION, help="branch of the dataset repo to load (default: %(default)s)")
+    ap.add_argument("--dataset-config", default = "cmv", help="dataset config/subset name (cmv, cmv_thread, ddo_switch, ddo_undecided); omit for default")
+    ap.add_argument("--truncation-side", choices=("right", "left"), default="right",
+                    help="which end of an over-long text is cut; left keeps the end of the reply, "
+                         "i.e. the latest comments of a cmv_thread discussion (default: %(default)s)")
     ap.add_argument("--push", action="store_true", help=f"push the model to a private repo, {MODEL_REPO}-<config>")
     ap.add_argument("--smoke", action="store_true", help="tiny/fast pipeline check")
     ap.add_argument("--bf16", action="store_true", help="train with bf16 mixed precision (default: fp32, as the T1 baseline)")
@@ -104,7 +105,7 @@ def main():
     max_length = 256 if args.smoke else MAX_LENGTH
     save_steps = 2   if args.smoke else SAVE_STEPS
 
-    ds = load_dataset(DATASET_REPO, args.dataset_config, revision=args.dataset_revision, token=HF_TOKEN).rename_column("label", "labels")
+    ds = load_dataset(DATASET_REPO, args.dataset_config, token=HF_TOKEN).rename_column("label", "labels")
     if args.smoke:
         ds = DatasetDict({k: v.select(range(32)) for k, v in ds.items()})
 
@@ -115,6 +116,7 @@ def main():
     print("[CLASSES] " + ", ".join(f"{n}={c} (weight {w:.2f})" for n, c, w in zip(label_names, counts, class_weights.tolist())))
 
     tok = AutoTokenizer.from_pretrained(MODEL_NAME, token=HF_TOKEN)
+    tok.truncation_side = args.truncation_side
 
     def tokenize(batch):
         return tok(batch["original"], batch["reply"], truncation="longest_first", max_length=max_length)

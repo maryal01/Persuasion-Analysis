@@ -58,10 +58,19 @@ python scripts/train_delta.py --dataset-config ddo_switch --push
 
 # fast end-to-end pipeline check
 python scripts/train_delta.py --smoke
+
+# CMV thread outcome: keep the end of an over-long discussion instead of its start
+python scripts/train_delta.py --dataset-config cmv_thread --truncation-side left --bf16
 ```
 
 Data is loaded from the `t1-t2` branch by default; `--dataset-revision main`
 loads the shared branch instead.
+
+Inputs are cut to 8,192 tokens, the most ModernBERT reads. `cmv_thread` (a post and its whole
+discussion up to the OP's first award attempt) has long inputs: 23% of the threads exceed that.
+`--truncation-side left` cuts the start of the discussion rather than its end, which keeps the
+comment that earned the delta in 97% of delta threads, against 93% with the default; a post longer
+than half the window then loses its start too (10 posts).
 
 The loss is class-weighted (inverse frequency), and the best checkpoint is chosen
 by validation AUROC (binary configs) or macro-F1 (`ddo_undecided`). Test
