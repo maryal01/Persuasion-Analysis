@@ -66,6 +66,9 @@ python scripts/create_dataset.py --dry-run
 # build and push every config (or one source: --sources cmv)
 python scripts/create_dataset.py
 
+# T5 configs only (about 2 minutes, 2.5 GB of memory)
+python scripts/create_dataset.py --sources cmv_history
+```
 # cmv_thread only: about 2 minutes; the threads are streamed to the datasets cache (about 2 GB)
 python scripts/create_dataset.py --sources cmv_thread
 
