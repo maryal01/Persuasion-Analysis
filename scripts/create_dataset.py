@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from collections import Counter, defaultdict
 
 import ijson
@@ -22,6 +23,14 @@ OTHER_CRITERIA = (
     "Made more convincing arguments",
     "Used the most reliable sources",
 )
+
+DELTA_SYMBOL = re.compile(r"[∆Δ]|&(?:amp;)?#8710;|!delta", re.IGNORECASE)
+DELTA_MENTION = re.compile(r"[∆Δ]|&(?:amp;)?#8710;|\bdelta", re.IGNORECASE)
+MISSING = (None, "", "[deleted]", "[removed]")
+BOTS = ("DeltaBot", "AutoModerator")
+# a line that starts with "Edit:", "EDIT2 -", "**Update**", "Further edit:", ... up to the end of its paragraph
+EDIT_NOTE = re.compile(r"(?ims)^(?:&gt;|[ \t>*_#(\[\-])*(?:\w+ )?(?:edit(?:ed|s)?|update[ds]?|eta)\s*#?\d*\b\s*[:\-–—*)\]].*?(?=\n\s*\n|\Z)")
+MOD_FOOTNOTE = re.compile(r"(?is)[_\s]*(?:&gt;|>)?\s*\*?\s*(?:Hello, [^\n]{0,40}?[.!]\s*)?This is a footnote from (?:the |your )(?:CMV )?moderators.*\Z")
 
 def split_of(group_id):
     """Deterministic split for a CMV post or DDO debate, so all of its rows land in the same split
@@ -134,15 +143,90 @@ def build_ddo_votes(path):
     return {"ddo_switch": to_splits(switch, ["stayed", "switched"]),
             "ddo_undecided": to_splits(undecided, ["tie", "pro", "con"])}
 
+def cmv_comments(comments, parent=None):
+    """Every comment of a CMV thread with its parent comment (None at the top level)."""
+    for c in comments or []:
+        yield c, parent
+        yield from cmv_comments(c.get("children"), c)
+
+def cmv_clean(text):
+    """CMV text without "Edit:" notes (written after the discussion started) and without the
+    paragraphs that mention a delta, either of which can give the outcome away.
+    """
+    paragraphs = (p.strip() for p in re.split(r"\n\s*\n", EDIT_NOTE.sub("", text)))
+    return "\n\n".join(p for p in paragraphs if p and not DELTA_MENTION.search(p))
+
+def cmv_thread_rows(path):
+    """The cmv_thread rows of threads.jsonl (see build_cmv_thread), one post at a time."""
+    with open(path) as fh:
+        for line in fh:
+            s = json.loads(line)
+            op = s.get("author")
+            if op in MISSING or s.get("selftext") == "[removed]" or (s.get("link_flair_text") or "").lower().startswith("removed"):
+                continue
+            comments = list(cmv_comments(s.get("comments")))
+            answered = [(c, parent) for c, parent in comments
+                        if c.get("author") == "DeltaBot" and parent is not None and parent.get("author") == op]
+            delta = any((c.get("body") or "").startswith("Confirmed") for c, _ in answered)
+            # the discussion stops at the OP's first award attempt: a comment of theirs with a delta
+            # symbol or an answer from DeltaBot (confirmed or rejected)
+            attempts = [parent for _, parent in answered] + [c for c, _ in comments
+                                                             if c.get("author") == op and DELTA_SYMBOL.search(c.get("body") or "")]
+            cutoff = min((float(c["created_utc"]) for c in attempts), default=float("inf"))
+            users, turns = {}, []
+            for c, _ in sorted(comments, key=lambda pair: float(pair[0]["created_utc"])):
+                author = c.get("author")
+                if author in BOTS or c.get("body") in MISSING or float(c["created_utc"]) >= cutoff:
+                    continue
+                text = cmv_clean(c["body"])
+                if text:
+                    name = ("OP" if author == op else "Deleted user" if author in MISSING
+                            else f"User {users.setdefault(author, len(users) + 1)}")
+                    turns.append(f"{name}: {text}")
+            if not turns:
+                continue  # nothing was said before the outcome
+            body = "" if s.get("selftext") in MISSING else MOD_FOOTNOTE.sub("", s["selftext"])
+            yield {"original": ((s.get("title") or "") + "\n\n" + cmv_clean(body)).strip(), "reply": "\n\n".join(turns),
+                   "label": int(delta), "post_id": s["id"], "author": op,
+                   "created_utc": int(float(s["created_utc"])), "n_comments": len(turns), "split": split_of(s["id"])}
+
+def build_cmv_thread(path):
+    """CMV thread outcome. Webis-CMV-20 threads.jsonl -> cmv_thread, one row per post that was not
+    removed, has a known author and at least one comment:
+    {original, reply, label, post_id, author, created_utc, n_comments}.
+
+    original  title + selftext, without the moderator footnote
+    reply     the discussion in time order, one "OP: ..." / "User 3: ..." turn per comment
+    label     delta if DeltaBot confirmed a delta the OP awarded (the `delta` field is empty before 2015)
+
+    The discussion stops right before the OP's first award attempt: their first comment that has a
+    delta symbol or that DeltaBot answered (confirmed or rejected). A delta thread therefore holds
+    the comment that earned the delta, but not the award or anything after it. A no-delta thread
+    usually has no attempt and keeps every comment, so the two classes differ in length and in how
+    they end: compare a model against n_comments alone. Bot comments, "Edit:" notes and paragraphs
+    that mention a delta are removed. Split by post like cmv, so a post is in the same split in
+    both configs.
+    Rows are streamed to the datasets cache, since the threads do not fit in memory.
+    """
+    ds = Dataset.from_generator(cmv_thread_rows, gen_kwargs={"path": path})
+    ds = ds.cast_column("label", ClassLabel(names=["nodelta", "delta"]))
+    splits = list(ds["split"])
+    return {"cmv_thread": DatasetDict({
+        name: ds.select([i for i, s in enumerate(splits) if s == name]).remove_columns("split")
+        for name in ("train", "validation", "test")
+    })}
+
 SOURCES = {
     "cmv": ("cmv/pairs.jsonl", build_cmv),
     "ddo": ("ddo/debates.json", build_ddo_votes),
+    "cmv_thread": ("cmv/threads.jsonl", build_cmv_thread),
 }
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Build the persuasion datasets and push them to the Hub.")
     ap.add_argument("--sources", nargs="+", choices=list(SOURCES), default=list(SOURCES),
-                    help="which raw sources to build (cmv -> cmv; ddo -> ddo_switch, ddo_undecided)")
+                    help="which raw sources to build (cmv -> cmv; ddo -> ddo_switch, ddo_undecided; "
+                         "cmv_thread -> cmv_thread)")
     ap.add_argument("--revision", default=REVISION, help="Hub branch to push to, created if missing (default: %(default)s)")
     ap.add_argument("--dry-run", action="store_true", help="build and print stats without pushing")
     return ap.parse_args()
