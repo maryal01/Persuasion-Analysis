@@ -7,7 +7,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from datasets import DatasetDict, load_dataset
-from huggingface_hub import login
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
@@ -96,8 +95,6 @@ def last_complete_checkpoint(outputdir):
 
 def main():
     args = parse_args()
-    login(token=HF_TOKEN)
-    
     epochs     = 1   if args.smoke else EPOCHS
     max_steps  = 4   if args.smoke else -1
     batch_size = 1   if args.smoke else BATCH_SIZE
