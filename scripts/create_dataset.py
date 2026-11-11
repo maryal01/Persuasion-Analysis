@@ -10,7 +10,6 @@ from datasets import ClassLabel, Dataset, DatasetDict
 from huggingface_hub import login
 
 REPO = "nlp-final-project11/persuasion-datasets"
-REVISION = "t1-t2"  # Hub branch to push to; main is the team's shared copy
 TEST_SIZE = 0.1
 VAL_SIZE = 0.1
 SEED = 42
@@ -43,17 +42,19 @@ def split_of(group_id):
         return "validation"
     return "train"
 
-def to_splits(rows, label_names):
-    """Rows (dicts with a 'split' key) -> DatasetDict(train, validation, test) with a ClassLabel 'label'."""
+def to_splits(rows, label_names=None):
+    """Rows (dicts with a 'split' key) -> DatasetDict(train, validation, test), with a ClassLabel
+    'label' if label_names is given.
+    """
     columns = defaultdict(lambda: defaultdict(list))
     for row in rows:
         split = row.pop("split")
         for k, v in row.items():
             columns[split][k].append(v)
-    return DatasetDict({
-        name: Dataset.from_dict(dict(columns[name])).cast_column("label", ClassLabel(names=label_names))
-        for name in ("train", "validation", "test")
-    })
+    splits = {name: Dataset.from_dict(dict(columns[name])) for name in ("train", "validation", "test")}
+    if label_names:
+        splits = {name: ds.cast_column("label", ClassLabel(names=label_names)) for name, ds in splits.items()}
+    return DatasetDict(splits)
 
 def build_cmv(path):
     """T1. Webis-CMV-20 pairs.jsonl -> {original, reply, label, pair_id, post_id}, two rows per pair.
@@ -216,18 +217,67 @@ def build_cmv_thread(path):
         for name in ("train", "validation", "test")
     })}
 
+def cmv_post_text(s):
+    """Title and body of a CMV post without delta symbols; a deleted or removed body is left out."""
+    body = s.get("selftext")
+    return DELTA_SYMBOL.sub(" ", (s.get("title") or "") + "\n\n" + ("" if body in MISSING else body)).strip()
+
+def build_cmv_history(path):
+    """T5. Webis-CMV-20 threads.jsonl -> two configs, both split by OP:
+
+    cmv_malleability  one row per post that was not removed and has a known author:
+                      {original, label, post_id, author, created_utc}. label = DeltaBot confirmed a
+                      delta the OP awarded (the dataset's `delta` field is empty before 2015).
+    cmv_history       every post and comment those OPs wrote in r/changemyview, one row each:
+                      {author, kind, created_utc, edited_utc, text}; kind is post, comment, or
+                      own_thread_comment (in a thread the author started).
+
+    The history of a post is the cmv_history rows of its author with created_utc before the post's
+    and edited_utc null or before it: the stored text is the edited version, so later edits could
+    leak the outcome. Histories are not truncated. Delta symbols are removed from all text, and
+    text edited at an unknown time is dropped. `original` keeps "Edit:" paragraphs the OP added later.
+    """
+    posts = []
+    with open(path) as fh:
+        for line in fh:
+            s = json.loads(line)
+            op = s.get("author")
+            if op in MISSING or s.get("selftext") == "[removed]" or (s.get("link_flair_text") or "").lower().startswith("removed"):
+                continue
+            awarded = any(c.get("author") == "DeltaBot" and (c.get("body") or "").startswith("Confirmed")
+                          and parent is not None and parent.get("author") == op
+                          for c, parent in cmv_comments(s.get("comments")))
+            posts.append({"original": cmv_post_text(s), "label": int(awarded), "post_id": s["id"].removeprefix("t3_"),
+                          "author": op, "created_utc": int(float(s["created_utc"])), "split": split_of(op)})
+    ops = {p["author"] for p in posts}
+
+    history = []
+    with open(path) as fh:  # second pass: the texts of every author would not fit in memory
+        for line in fh:
+            s = json.loads(line)
+            texts = [("post", s, cmv_post_text(s))] if s.get("author") in ops else []
+            texts += [("own_thread_comment" if c["author"] == s.get("author") else "comment", c, DELTA_SYMBOL.sub(" ", c["body"]).strip())
+                      for c, _ in cmv_comments(s.get("comments")) if c.get("author") in ops and c.get("body") not in MISSING]
+            for kind, item, text in texts:
+                edited = item.get("edited")  # False, the edit time, or True when the time is unknown
+                if text and edited is not True:
+                    history.append({"author": item["author"], "kind": kind, "created_utc": int(float(item["created_utc"])),
+                                    "edited_utc": int(edited) if edited else None, "text": text,
+                                    "split": split_of(item["author"])})
+    return {"cmv_malleability": to_splits(posts, ["nodelta", "delta"]), "cmv_history": to_splits(history)}
+
 SOURCES = {
     "cmv": ("cmv/pairs.jsonl", build_cmv),
     "ddo": ("ddo/debates.json", build_ddo_votes),
     "cmv_thread": ("cmv/threads.jsonl", build_cmv_thread),
+    "cmv_history": ("cmv/threads.jsonl", build_cmv_history),
 }
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Build the persuasion datasets and push them to the Hub.")
     ap.add_argument("--sources", nargs="+", choices=list(SOURCES), default=list(SOURCES),
                     help="which raw sources to build (cmv -> cmv; ddo -> ddo_switch, ddo_undecided; "
-                         "cmv_thread -> cmv_thread)")
-    ap.add_argument("--revision", default=REVISION, help="Hub branch to push to, created if missing (default: %(default)s)")
+                         "cmv_thread -> cmv_thread; cmv_history -> cmv_malleability, cmv_history)")
     ap.add_argument("--dry-run", action="store_true", help="build and print stats without pushing")
     return ap.parse_args()
 
@@ -239,15 +289,14 @@ def main():
     for source in args.sources:
         path, builder = SOURCES[source]
         for name, dsd in builder(path).items():
-            names = dsd["train"].features["label"].names
+            names = dsd["train"].features["label"].names if "label" in dsd["train"].features else []
             for split, ds in dsd.items():
-                counts = Counter(ds["label"])
+                counts = Counter(ds["label"]) if names else {}
                 print(f"[{name}] {split:10s} {len(ds):7d} rows  "
                       + ", ".join(f"{n}={counts[i]}" for i, n in enumerate(names)))
             if not args.dry_run:
-                dsd.push_to_hub(REPO, config_name=name, private=True, token=token, revision=args.revision)
-                print(f"[{name}] pushed -> https://huggingface.co/datasets/{REPO}/tree/{args.revision} "
-                      f"(config: {name}, branch: {args.revision}, private)")
+                dsd.push_to_hub(REPO, config_name=name, private=True, token=token)
+                print(f"[{name}] pushed -> https://huggingface.co/datasets/{REPO} (config: {name}, private)")
 
 if __name__ == "__main__":
     main()

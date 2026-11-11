@@ -27,6 +27,18 @@ attempt and keep every comment, so the two classes differ in length and in how t
 model next to `n_comments` alone. Bot comments, `Edit:` notes and paragraphs that mention a delta are
 removed. Threads are split by post with the same rule as `cmv`, so a post is in the same split in both.
 
+T5 (will the OP award a delta, given their history?) uses two more configs, both split by OP:
+
+| Config | Rows | Columns |
+|--------|------|---------|
+| `cmv_malleability` | one per CMV post that was not removed and has a known author (41,714) | `original` (title + selftext), `label` (`delta` if DeltaBot confirmed a delta the OP awarded), `post_id`, `author`, `created_utc` |
+| `cmv_history` | every post and comment those OPs wrote in r/changemyview (1,684,662) | `author`, `kind` (`post`, `comment`, `own_thread_comment`), `created_utc`, `edited_utc`, `text` |
+
+The history of a post is the `cmv_history` rows of its `author` with `created_utc` before the post's
+and `edited_utc` null or before it. Apply both conditions: the stored text is the edited version, so a
+later edit can reveal the outcome. Histories are not truncated (21% of posts have more than about
+8,192 tokens of history; 39% have none). Delta symbols are removed from all text.
+
 ## Setup
 
 ```bash
@@ -45,7 +57,7 @@ export HF_TOKEN=hf_xxx
 Raw inputs (gitignored), relative to the project root:
 - `cmv/pairs.jsonl` — decompressed `pairs.jsonl.bz2` from [Webis-CMV-20](https://zenodo.org/records/3778298)
 - `ddo/debates.json` — from the DDO corpus
-- `cmv/threads.jsonl` — decompressed `threads.jsonl.bz2` from Webis-CMV-20 (3.6 GB; only for `--sources cmv_thread`)
+- `cmv/threads.jsonl` — decompressed `threads.jsonl.bz2` from Webis-CMV-20 (3.6 GB; only for `--sources cmv_thread` and `cmv_history`)
 
 ```bash
 # build and print split/label counts without pushing
@@ -56,10 +68,10 @@ python scripts/create_dataset.py
 
 # cmv_thread only: about 2 minutes; the threads are streamed to the datasets cache (about 2 GB)
 python scripts/create_dataset.py --sources cmv_thread
-```
 
-Pushes go to the `t1-t2` branch of the dataset repo, which is created on first
-push, so the shared `main` branch is left alone. Pass `--revision main` to publish there.
+# T5 configs only (about 2 minutes, 2.5 GB of memory)
+python scripts/create_dataset.py --sources cmv_history
+```
 
 ## 2. Fine-tune & publish the model — `scripts/train_delta.py`
 ```bash
@@ -72,9 +84,6 @@ python scripts/train_delta.py --dataset-config ddo_switch --push
 # fast end-to-end pipeline check
 python scripts/train_delta.py --smoke
 ```
-
-Data is loaded from the `t1-t2` branch by default; `--dataset-revision main`
-loads the shared branch instead.
 
 The loss is class-weighted (inverse frequency), and the best checkpoint is chosen
 by validation AUROC (binary configs) or macro-F1 (`ddo_undecided`). Test
