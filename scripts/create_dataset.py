@@ -69,11 +69,14 @@ def build_cmv(path):
     with open(path) as fh:
         for pair_id, line in enumerate(fh):
             r = json.loads(line)
+
             s = r["submission"]
-            if s.get("author") in (r["delta_comment"]["author"], r["nodelta_comment"]["author"]):
+            op = s.get("author")
+            if op in MISSING or op in (r["delta_comment"]["author"], r["nodelta_comment"]["author"]):
                 continue
             original = (s.get("title", "") + "\n\n" + s.get("selftext", "")).strip()
-            split = split_of(r["submission_id"])
+            split = split_of(op)
+            
             for key, label in (("delta_comment", 1), ("nodelta_comment", 0)):
                 reply = "\n\n".join(c.get("body", "") for c in r[key]["comments"]).strip()
                 rows.append({"original": original, "reply": reply, "label": label,
