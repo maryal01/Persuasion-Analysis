@@ -34,6 +34,17 @@ rather than pairwise: word count 51.9%, Tan et al.'s best text features 57.8%, t
 debater traits 61.1%. Their metric differs from ours, so don't compare the numbers directly.
 Tan et al. (2016)'s 65.1% is on a different corpus.
 
+## CMV thread outcome (`cmv_thread`)
+
+Given a post and its whole discussion up to the OP's first award attempt, predict whether the OP
+awards a delta. Test set: 3,704 threads (34.8% delta), split by post like `cmv`, so 576 of the 578
+T1 test posts are in it.
+
+- Delta threads are shorter because they stop at the award, and the delta rate rose from 2013 to
+  2017. A model has to beat these numbers to show that it reads the arguments.
+- Do not compare with T1's AUROC (0.629): T1 ranks single replies to posts that all received a
+  delta, this ranks whole threads. 565 of the 576 shared test posts are delta threads.
+
 ## T2: DDO voter switching (`ddo_switch`, `ddo_undecided`)
 
 Not trained yet.
