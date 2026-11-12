@@ -16,7 +16,9 @@ to the view it argues against, so both are tokenized together as a text pair.
 Splits are 80/10/10 by **group**: all rows of a CMV post, or of a DDO debate,
 land in the same split (the two DDO configs share one assignment). On DDO, votes
 by the debaters themselves are dropped, and so are side-to-tie votes in
-`ddo_switch`. Empty turns and the placeholder text `forfeit` are removed from transcripts.
+`ddo_switch`. `ddo_undecided` also leaves out tied votes cast before about September 2008 (dated
+"10 years ago" in the corpus): 98.9% of the votes from that period share one fixed pattern, which
+points to an older voting form that did not ask for a stance. Empty turns and the placeholder text `forfeit` are removed from transcripts.
 
 T5 (will the OP award a delta, given their history?) uses two more configs, both split by OP:
 
