@@ -2,8 +2,10 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import re
 from collections import Counter, defaultdict
+from functools import partial
 
 import ijson
 from datasets import ClassLabel, Dataset, DatasetDict
@@ -157,8 +159,14 @@ def cmv_clean(text):
     paragraphs = (p.strip() for p in re.split(r"\n\s*\n", EDIT_NOTE.sub("", text)))
     return "\n\n".join(p for p in paragraphs if p and not DELTA_MENTION.search(p))
 
-def cmv_thread_rows(path):
-    """The cmv_thread rows of threads.jsonl (see build_cmv_thread), one post at a time."""
+def cmv_thread_rows(path, delta_turn_counts=None):
+    """The cmv_thread rows of threads.jsonl (see build_cmv_thread), one post at a time.
+
+    With delta_turn_counts (the turn counts of the delta threads), a no-delta thread that never
+    reached an award attempt is cut to a turn count drawn from them, seeded by post id so rebuilds
+    match; such rows get a `truncated` flag. It is a tuple, not a list: datasets treats a list in
+    gen_kwargs as shards to split across workers.
+    """
     with open(path) as fh:
         for line in fh:
             s = json.loads(line)
@@ -186,12 +194,22 @@ def cmv_thread_rows(path):
                     turns.append(f"{name}: {text}")
             if not turns:
                 continue  # nothing was said before the outcome
+            truncated = False
+            # a delta thread stops before the award, a no-delta thread usually runs to its end; cutting
+            # the latter to a delta thread's turn count stops length from giving the label away
+            if delta_turn_counts and not delta and cutoff == float("inf"):
+                keep = random.Random(f"{SEED}:{s['id']}").choice(delta_turn_counts)
+                truncated = keep < len(turns)
+                turns = turns[:keep]
             body = "" if s.get("selftext") in MISSING else MOD_FOOTNOTE.sub("", s["selftext"])
-            yield {"original": ((s.get("title") or "") + "\n\n" + cmv_clean(body)).strip(), "reply": "\n\n".join(turns),
+            row = {"original": ((s.get("title") or "") + "\n\n" + cmv_clean(body)).strip(), "reply": "\n\n".join(turns),
                    "label": int(delta), "post_id": s["id"], "author": op,
                    "created_utc": int(float(s["created_utc"])), "n_comments": len(turns), "split": split_of(s["id"])}
+            if delta_turn_counts is not None:
+                row["truncated"] = truncated
+            yield row
 
-def build_cmv_thread(path):
+def build_cmv_thread(path, matched=False):
     """CMV thread outcome. Webis-CMV-20 threads.jsonl -> cmv_thread, one row per post that was not
     removed, has a known author and at least one comment:
     {original, reply, label, post_id, author, created_utc, n_comments}.
@@ -208,11 +226,22 @@ def build_cmv_thread(path):
     that mention a delta are removed. Split by post like cmv, so a post is in the same split in
     both configs.
     Rows are streamed to the datasets cache, since the threads do not fit in memory.
+
+    matched=True builds cmv_thread_matched instead: the same rows, except that each no-delta thread
+    without an award attempt keeps only as many turns as a randomly drawn delta thread (seeded by
+    post id), so both classes have about the same turn-count distribution. Such rows have
+    truncated=True if anything was cut. This takes a second pass over the file to collect the delta
+    threads' turn counts first.
     """
-    ds = Dataset.from_generator(cmv_thread_rows, gen_kwargs={"path": path})
+    gen_kwargs, name = {"path": path}, "cmv_thread"
+    if matched:
+        delta_turns = tuple(sorted(r["n_comments"] for r in cmv_thread_rows(path) if r["label"] == 1))
+        print(f"[cmv_thread_matched] {len(delta_turns)} delta threads; median turns {delta_turns[len(delta_turns) // 2]}")
+        gen_kwargs, name = {"path": path, "delta_turn_counts": delta_turns}, "cmv_thread_matched"
+    ds = Dataset.from_generator(cmv_thread_rows, gen_kwargs=gen_kwargs)
     ds = ds.cast_column("label", ClassLabel(names=["nodelta", "delta"]))
     splits = list(ds["split"])
-    return {"cmv_thread": DatasetDict({
+    return {name: DatasetDict({
         name: ds.select([i for i, s in enumerate(splits) if s == name]).remove_columns("split")
         for name in ("train", "validation", "test")
     })}
@@ -270,6 +299,7 @@ SOURCES = {
     "cmv": ("cmv/pairs.jsonl", build_cmv),
     "ddo": ("ddo/debates.json", build_ddo_votes),
     "cmv_thread": ("cmv/threads.jsonl", build_cmv_thread),
+    "cmv_thread_matched": ("cmv/threads.jsonl", partial(build_cmv_thread, matched=True)),
     "cmv_history": ("cmv/threads.jsonl", build_cmv_history),
 }
 
@@ -277,7 +307,8 @@ def parse_args():
     ap = argparse.ArgumentParser(description="Build the persuasion datasets and push them to the Hub.")
     ap.add_argument("--sources", nargs="+", choices=list(SOURCES), default=list(SOURCES),
                     help="which raw sources to build (cmv -> cmv; ddo -> ddo_switch, ddo_undecided; "
-                         "cmv_thread -> cmv_thread; cmv_history -> cmv_malleability, cmv_history)")
+                         "cmv_thread -> cmv_thread; cmv_thread_matched -> cmv_thread_matched; "
+                         "cmv_history -> cmv_malleability, cmv_history)")
     ap.add_argument("--dry-run", action="store_true", help="build and print stats without pushing")
     return ap.parse_args()
 
