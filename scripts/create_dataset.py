@@ -204,7 +204,7 @@ def cmv_thread_rows(path, delta_turn_counts=None):
             body = "" if s.get("selftext") in MISSING else MOD_FOOTNOTE.sub("", s["selftext"])
             row = {"original": ((s.get("title") or "") + "\n\n" + cmv_clean(body)).strip(), "reply": "\n\n".join(turns),
                    "label": int(delta), "post_id": s["id"], "author": op,
-                   "created_utc": int(float(s["created_utc"])), "n_comments": len(turns), "split": split_of(s["id"])}
+                   "created_utc": int(float(s["created_utc"])), "n_comments": len(turns), "split": split_of(op)}
             if delta_turn_counts is not None:
                 row["truncated"] = truncated
             yield row
