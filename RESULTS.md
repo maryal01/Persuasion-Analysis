@@ -82,4 +82,51 @@ who stayed. Chance is 0.500.
 
 ### `ddo_undecided`: which side does a tied voter end on?
 
-Not trained yet.
+Test set: 7,091 votes from 3,649 debates that never appear in training (dataset branch `t1-t2`,
+commit `7b4add9`). Each row is one audience member recorded as tied before the debate; 6,508 of them
+(91.8%) are still tied after it, 256 end on Pro and 327 on Con. Tied votes cast before about
+September 2008 are left out (see "Old-form votes" below). The main metric is **macro-F1** over the
+three classes.
+
+| Model | Macro-F1 | Accuracy |
+|---|---|---|
+| Random guess | 0.212 | 33.3% |
+| Always "tie" | 0.319 | 91.8% |
+| Year of the debate | 0.377 | 77.9% |
+| **ModernBERT-base, text only** | **0.360** | 64.4% |
+
+- **The model does not beat a rule that uses only the year of the debate.** It is 0.04 above always
+  answering "tie" and 0.02 below the year rule. The year rule uses no text and the same class
+  weighting as the model: it predicts the class that is most over-represented in that year in the
+  training set. The year matters because 22% of tied voters left the tie in 2009 debates, against 3%
+  in 2015 ones.
+- Model: [`nlp-final-project11/nlp-project-modernbert-ddo_undecided`](https://huggingface.co/nlp-final-project11/nlp-project-modernbert-ddo_undecided)
+  (private). Seed 42, 3 epochs (5,454 steps), max 4,096 tokens, bf16 mixed precision (`--bf16`),
+  class weights tie 0.36, pro 8.86, con 6.95. Trained on Gilbreth (one A100) in two chained standby
+  jobs, about 7h00m in total: Slurm job 12342062 hit the 4-hour limit, and job 12342063 resumed from
+  checkpoint 3000 and finished in 3h00m.
+- Checkpoint: step 5454, the last one, which had the highest validation macro-F1 (0.345).
+- The script reports only accuracy and macro-F1 for three-class configs, so there are no per-class
+  numbers. The two reported numbers put the F1 for `tie` between 0.76 and 0.82, which leaves `pro`
+  and `con` at about 0.13 to 0.16 each on average.
+- Accuracy is far below "always tie" because the loss weights the rare classes up: at least 1,944
+  voters who stayed tied (30%) are predicted to pick a side.
+
+**Old-form votes.** Earlier builds of this config included tied votes cast before about September
+2008. The corpus dates 49,910 votes as cast "10 years ago", and 98.9% of them have one fixed pattern:
+tied before and after, one debater marked on "Made more convincing arguments", everything else tied.
+Voters active in both periods use that pattern in 97% of their early votes and 5% of their later
+ones. This fits an older voting form without the before/after questions, but the corpus readme
+doesn't say so. Those votes were 49,455 of the 121,865 rows, and 26 of them left the tie.
+`ddo_switch` has 446 votes from that period and keeps them, because those voters marked a side.
+
+A first run on the earlier build (dataset commit `e236e8d`, model commit `8b027e5`, Slurm jobs
+12309143 to 12309146) scored macro-F1 0.375 and accuracy 82.6% on 12,073 test votes, against 0.325
+and 95.1% for always "tie". Its test set is different, so the two runs can't be compared directly.
+
+**Caveats**
+- One run, one random seed. The comparisons rest on the 583 test voters who left the tie.
+- Every tied voter in a debate gets the same input, so the model gives them all the same answer: the
+  7,091 test rows have 3,649 distinct inputs, and in 347 debates the tied voters end differently.
+- A later "tied before" can still be a skipped answer, and that can't be told apart from a real tie.
+- Inputs are cut at 4,096 tokens, while the proposal planned 8k.
