@@ -11,7 +11,7 @@ Research questions: (1) can we predict whether a listener changes their mind, gi
 | Task | Definition | Status |
 |---|---|---|
 | T1 CMV persuasion | score both replies of a (delta, no-delta) pair; the delta reply should score higher | first run done (ModernBERT-base, text only, pairwise acc 66.1%, one seed; `RESULTS.md`) |
-| T2 DDO persuasion | decided voter: did they switch; tied voter: Pro/Con/Tie after | datasets built, not trained |
+| T2 DDO persuasion | decided voter: did they switch; tied voter: Pro/Con/Tie after | first runs done (ModernBERT-base, text only, one seed; `RESULTS.md`): `ddo_switch` AUROC 0.719, `ddo_undecided` macro-F1 0.360 against 0.319 for always "tie" and 0.377 for a year-only rule |
 | T3 Audience profiling | predict a person's stance on broad dimensions from their activity | not started |
 | T4 DDO vote prediction | reproduce Durmus & Cardie's "more convincing" vote prediction | not started |
 | T5 CMV malleability | from the OP's post and history, predict whether they award any delta | dataset configs built (`cmv_malleability`, `cmv_history`: each OP's CMV posts and comments from `threads.jsonl`), not trained; 21% of posts have more history than 8,192 tokens |
