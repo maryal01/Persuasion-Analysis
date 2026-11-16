@@ -55,6 +55,12 @@ The columns are `user`, `kind`, `debate_id`, `text`, `side`, `side_before`, `tit
 
 `debate_id`, `category` and `debate_date` are set for debate rows and null otherwise.
 
+**Votes without sides.** `side` and `side_before` are null for two groups of vote rows:
+- **Old-form votes (37,426 rows):** votes dated "10 years ago" in `debates.json` that are tied before
+  the debate. They were cast before about September 2008, under a voting form that most likely did
+  not ask for a stance. T2 leaves the same votes out of `ddo_undecided` (PR #24).
+- **Unclear votes (3,480 rows):** the voter marked no side, or more than one.
+
 ## Splits
 
 - **Both tables split by user** with `split_of(user)` from `scripts/create_dataset.py`.
