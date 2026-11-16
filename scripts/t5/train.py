@@ -104,6 +104,7 @@ def main() -> None:
     parser.add_argument("--keep-last", action="store_true", help="keep the resume checkpoint after the test scoring")
     args = parser.parse_args()
     args.epochs = args.epochs or (1 if args.smoke else 3)
+    sys.stdout.reconfigure(line_buffering=True)  # show progress live when the output is redirected to a file
 
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -158,6 +159,7 @@ def main() -> None:
     for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         running = 0.0
+        epoch_start = time.time()
         for step, batch in enumerate(loaders["train"], 1):
             group = args.grad_accum if step <= n_batches - last_group else last_group  # batches that share this optimizer step
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=bf16):
@@ -165,6 +167,9 @@ def main() -> None:
             loss = loss_fn(logits.float(), batch["labels"].to(device)) / group
             loss.backward()
             running += loss.item() * group
+            if step % 50 == 0:
+                spent = time.time() - epoch_start
+                print(f"[STEP] epoch {epoch} batch {step}/{n_batches} mean loss {running / step:.4f} elapsed {spent:.0f}s, about {spent * (n_batches - step) / step:.0f}s left in this epoch")
             if step % args.grad_accum == 0 or step == n_batches:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step(); scheduler.step(); optimizer.zero_grad(set_to_none=True)
