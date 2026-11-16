@@ -1,25 +1,19 @@
-"""T5 (CMV malleability) baselines without a neural network: majority class, posting year, post length, bag of words, author LIWC/Receptiviti features.
+"""T5 (CMV malleability) baselines without a neural network.
 
-Hyperparameters are chosen on the validation split only (AUROC); the test split is scored once per model.
-Test AUROC and PR-AUC get 95% intervals from a bootstrap over OPs (1,000 resamples). Data loading, the date filter, the
-metrics and the bootstrap come from t5_common.py, shared with train.py (ModernBERT), so both see the same posts.
+Logistic regression on: the majority class, the posting date, the post length, the words of the post (TF-IDF), the author's
+LIWC and Receptiviti numbers, and words together with the author numbers. Penalty (L1/L2) and strength C are chosen on the
+validation split (AUROC); the test split is scored once per model. Test AUROC and PR-AUC get 95% intervals from a bootstrap
+over authors. The data is read from the Hub (scripts/t5/t5_data.py), the same data and splits as train.py (ModernBERT).
 
-Usage (from the repository root; needs numpy and scikit-learn):
-    python scripts/t5/baselines.py \
-        --data-dir <out_dir>/t5_dataset \
-        --output-dir <out_dir>/t5_baselines
-`--data-dir` is the output of scripts/t5/build_dataset.py (DeltaBot label; the script stops on a dataset with another label).
-All posts are used. The post text is cleaned by t5_common.clean_text() (moderator footnote, the OP's later Edit:/Update: paragraphs and delta symbols removed).
-The "post_time" row (posting time as the only feature) shows how much of the label is time alone.
+Usage (from the repository root; needs numpy, scikit-learn and a Hugging Face login or HF_TOKEN):
+    python scripts/t5/baselines.py --output-dir <out_dir>/t5_baselines
 Writes baselines.json and prints a table.
 """
 import argparse
 import json
-import sys
+from itertools import product
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 from scipy.sparse import csr_matrix, hstack
@@ -27,98 +21,134 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 
-from t5_common import bootstrap_by_group, check_label, load_rows, metrics, post_datetime, standardizer
+from t5_data import HUB_REVISION, SPLIT_NAMES, T5Data, fit_scaler, load_t5_data
+from t5_evaluation import bootstrap_by_author, metrics
 
-Rows = List[Dict[str, Any]]  # rows of one split, see t5_common.Row
-Matrices = Tuple[Any, Any, Any]  # (train, validation, test) design matrices of one model
+Matrices = Tuple[Any, Any, Any]  # the design matrices of one model for (train, validation, test)
 C_GRID = (0.001, 0.01, 0.1, 1.0, 10.0)
 PENALTIES = ("l1", "l2")
+AUTHOR_FEATURES = {  # name of the model -> prefixes of the feature columns it uses
+    "liwc_only": ("liwc_",),
+    "receptiviti_only": ("recv_",),
+    "liwc_receptiviti_all": ("liwc_", "recv_"),
+}
 
 
-def feature_matrix(rows: Rows) -> np.ndarray:
-    """(n, n_features) matrix of the author features of the rows."""
-    return np.array([r["features"] for r in rows], dtype=float)
+# --- design matrices ----------------------------------------------------------------------------------------------------
+
+def standardize(matrices: Sequence[np.ndarray], column_names: List[str]) -> Matrices:
+    """Standardize the (train, validation, test) matrices with the statistics of the training matrix."""
+    scale = fit_scaler(matrices[0], column_names)
+    return tuple(scale(matrix) for matrix in matrices)
 
 
-def scaled(parts: List[np.ndarray], names: List[str]) -> Tuple[np.ndarray, ...]:
-    """Standardize [train, validation, test] matrices with the train statistics."""
-    transform = standardizer(parts[0], names)
-    return tuple(transform(p) for p in parts)
+def time_matrices(data: T5Data) -> Matrices:
+    """The posting time as one standardized column (to see how much of the label is just time)."""
+    return standardize([split.years().reshape(-1, 1) for split in data.splits], ["time"])
 
 
-def fit_logistic(matrices: Matrices, labels: Tuple[np.ndarray, ...], groups_test: List[str]) -> Dict[str, Any]:
-    """Grid search penalty and C on validation AUROC (class-balanced weights), then score validation and test."""
-    (x_train, x_val, x_test), (y_train, y_val, y_test) = matrices, labels
-    best: Dict[str, Any] = {"val_auroc": -1.0}
-    for penalty in PENALTIES:
-        for c in C_GRID:
-            model = LogisticRegression(penalty=penalty, C=c, solver="liblinear", class_weight="balanced", max_iter=2000, random_state=0)
-            model.fit(x_train, y_train)
-            val_auroc = roc_auc_score(y_val, model.predict_proba(x_val)[:, 1])
-            if val_auroc > best["val_auroc"]:
-                best = {"val_auroc": float(val_auroc), "penalty": penalty, "C": c, "model": model}
-    model = best.pop("model")
-    test_scores = model.predict_proba(x_test)[:, 1]
-    return {**best, "val": metrics(model.predict_proba(x_val)[:, 1], y_val), "test": metrics(test_scores, y_test),
-            "test_ci95": bootstrap_by_group(test_scores, y_test, groups_test)}
+def length_matrices(data: T5Data) -> Matrices:
+    """The logarithm of the post length in characters as one standardized column."""
+    return standardize([np.log1p([[len(text)] for text in split.texts]) for split in data.splits], ["length"])
+
+
+def word_matrices(data: T5Data) -> Matrices:
+    """TF-IDF of the words of the post; the vocabulary is learned on the training posts only."""
+    vectorizer = TfidfVectorizer(max_features=20000, min_df=3, sublinear_tf=True).fit(data.train.texts)
+    return tuple(vectorizer.transform(split.texts) for split in data.splits)
+
+
+def author_matrices(data: T5Data, prefixes: Tuple[str, ...]) -> Matrices:
+    """The standardized author features whose names start with one of the prefixes."""
+    columns = [i for i, name in enumerate(data.feature_names) if name.startswith(prefixes)]
+    names = [data.feature_names[i] for i in columns]
+    return standardize([split.features[:, columns] for split in data.splits], names)
+
+
+def words_with_author(words: Matrices, author: Matrices) -> Matrices:
+    """The word matrix with the author columns next to it, for each split."""
+    return tuple(hstack([w, csr_matrix(a)]).tocsr() for w, a in zip(words, author))
+
+
+# --- fitting ------------------------------------------------------------------------------------------------------------
+
+def best_by_validation(matrices: Matrices, data: T5Data) -> Tuple[float, str, float, LogisticRegression]:
+    """Fit every (penalty, C) pair on the training posts; return (validation AUROC, penalty, C, model) of the best one."""
+    x_train, x_validation, _ = matrices
+    fitted = []
+    for penalty, c in product(PENALTIES, C_GRID):
+        model = LogisticRegression(penalty=penalty, C=c, solver="liblinear", class_weight="balanced", max_iter=2000, random_state=0)
+        model.fit(x_train, data.train.labels)
+        validation_auroc = roc_auc_score(data.validation.labels, model.predict_proba(x_validation)[:, 1])
+        fitted.append((float(validation_auroc), penalty, c, model))
+    return max(fitted, key=lambda candidate: candidate[0])
+
+
+def fit_logistic(matrices: Matrices, data: T5Data) -> Dict[str, Any]:
+    """Choose the settings on the validation split, then report validation and test metrics and the test intervals."""
+    validation_auroc, penalty, c, model = best_by_validation(matrices, data)
+    validation_scores = model.predict_proba(matrices[1])[:, 1]
+    test_scores = model.predict_proba(matrices[2])[:, 1]
+    return {"val_auroc": validation_auroc, "penalty": penalty, "C": c,
+            "val": metrics(validation_scores, data.validation.labels),
+            "test": metrics(test_scores, data.test.labels),
+            "test_ci95": bootstrap_by_author(test_scores, data.test.labels, data.test.authors)}
+
+
+# --- report -------------------------------------------------------------------------------------------------------------
+
+def describe(data: T5Data, revision: str) -> Dict[str, Any]:
+    """The data the baselines ran on."""
+    splits = dict(zip(SPLIT_NAMES, data.splits))
+    return {"hub": {"revision": revision, "commit": data.hub_commit},
+            "n": {name: len(split) for name, split in splits.items()},
+            "n_ops": {name: len(set(split.authors)) for name, split in splits.items()},
+            "delta_rate": {name: float(split.labels.mean()) for name, split in splits.items()}}
+
+
+def table_row(name: str, result: Dict[str, Any]) -> str:
+    """One line of the printed table."""
+    auroc_low, auroc_high = result["test_ci95"]["auroc"]
+    pr_low, pr_high = result["test_ci95"]["pr_auc"]
+    test = result["test"]
+    return (f"{name:27s} {result['val']['auroc']:8.3f} {test['auroc']:9.3f} {f'[{auroc_low:.3f},{auroc_high:.3f}]':>19s} {test['pr_auc']:7.3f} "
+            f"{f'[{pr_low:.3f},{pr_high:.3f}]':>15s} {test['balanced_accuracy']:7.3f} {test['macro_f1']:7.3f}  {result['penalty']} C={result['C']}")
+
+
+def print_results(results: Dict[str, Any]) -> None:
+    print(f"Hub commit {results['hub']['commit'][:8]}; train/val/test {results['n']} (OPs {results['n_ops']}); "
+          f"delta rate { {k: round(v, 3) for k, v in results['delta_rate'].items()} }")
+    print(f"{'model':27s} {'valAUROC':>8s} {'testAUROC':>9s} {'AUROC 95% CI (OP)':>19s} {'PR-AUC':>7s} {'PR 95% CI':>15s} {'bal.acc':>7s} {'macroF1':>7s}  chosen")
+    majority = results["majority_class"]["test"]
+    print(f"{'majority class':27s} {'-':>8s} {majority['auroc']:9.3f} {'-':>19s} {majority['pr_auc']:7.3f} {'-':>15s} "
+          f"{majority['balanced_accuracy']:7.3f} {majority['macro_f1']:7.3f}")
+    for name in ("post_time", "post_length", "bow_tfidf", "liwc_only", "receptiviti_only", "liwc_receptiviti_all", "bow_plus_liwc_receptiviti"):
+        print(table_row(name, results[name]))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--hub-revision", default=HUB_REVISION, help="branch or commit of the Hub dataset (default: %(default)s)")
     args = parser.parse_args()
 
-    train, val, test = (load_rows(args.data_dir / f"{s}.jsonl") for s in ("train", "validation", "test"))
-    names = json.loads((args.data_dir / "feature_names.json").read_text()) # feature names in LIWC/Receptiviti
-    labels = tuple(np.array([r["label"] for r in rows]) for rows in (train, val, test))
-    groups_test = [r["author"] for r in test] # OP for each test sample
-    parts = (train, val, test)
+    data = load_t5_data(args.hub_revision)
+    results: Dict[str, Any] = describe(data, args.hub_revision)
 
-    check_label(train, args.data_dir)
-    results: Dict[str, Any] = {"data_dir": str(args.data_dir), "label": "deltabot", "n": {"train": len(train), "validation": len(val), "test": len(test)},
-                               "n_ops": {"train": len({r["author"] for r in train}), "validation": len({r["author"] for r in val}), "test": len({r["author"] for r in test})},
-                               "delta_rate": {"train": float(labels[0].mean()), "validation": float(labels[1].mean()), "test": float(labels[2].mean())}}
-
-    # majority class: the training prior as a constant score (AUROC 0.5, PR-AUC = delta rate)
-    results["majority_class"] = {"test": metrics(np.full(len(test), labels[0].mean()), labels[2])}
-
-    # posting year as the only feature (time confound of the label)
-    years = [np.array([[post_datetime(r["created_utc"]).year + post_datetime(r["created_utc"]).timetuple().tm_yday / 366] for r in rows]) for rows in parts]
-    results["post_time"] = fit_logistic(scaled(years, ["t"]), labels, groups_test)
-
-    # post length in characters (log), one feature
-    lengths = [np.log1p(np.array([[len(r["text"])] for r in rows], dtype=float)) for rows in parts]
-    results["post_length"] = fit_logistic(scaled(lengths, ["len"]), labels, groups_test)
-
-    # bag of words (tf-idf) of the post text, fitted on train only
-    tfidf = TfidfVectorizer(max_features=20000, min_df=3, sublinear_tf=True).fit([r["text"] for r in train])
-    bow = tuple(tfidf.transform([r["text"] for r in rows]) for rows in parts)
-    results["bow_tfidf"] = fit_logistic(bow, labels, groups_test)
-
-    # author features: all, LIWC only, Receptiviti only
-    groups = {"liwc_receptiviti_all": ("liwc_", "recv_"), "liwc_only": ("liwc_",), "receptiviti_only": ("recv_",)}
-    dense: Dict[str, Matrices] = {}
-    for group, prefix in groups.items():
-        columns = [i for i, n in enumerate(names) if n.startswith(prefix)]
-        dense[group] = scaled([feature_matrix(rows)[:, columns] for rows in parts], [names[i] for i in columns])
-        results[group] = {"n_features": len(columns), **fit_logistic(dense[group], labels, groups_test)}
-
-    # post text and all author features together
-    combined = tuple(hstack([bow[i], csr_matrix(dense["liwc_receptiviti_all"][i])]).tocsr() for i in range(3))
-    results["bow_plus_liwc_receptiviti"] = fit_logistic(combined, labels, groups_test)
+    # the training share of delta posts as a constant score: AUROC 0.5, PR-AUC = share of delta posts
+    results["majority_class"] = {"test": metrics(np.full(len(data.test), data.train.labels.mean()), data.test.labels)}
+    results["post_time"] = fit_logistic(time_matrices(data), data)
+    results["post_length"] = fit_logistic(length_matrices(data), data)
+    words = word_matrices(data)
+    results["bow_tfidf"] = fit_logistic(words, data)
+    author = {name: author_matrices(data, prefixes) for name, prefixes in AUTHOR_FEATURES.items()}
+    for name, matrices in author.items():
+        results[name] = {"n_features": matrices[0].shape[1], **fit_logistic(matrices, data)}
+    results["bow_plus_liwc_receptiviti"] = fit_logistic(words_with_author(words, author["liwc_receptiviti_all"]), data)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "baselines.json").write_text(json.dumps(results, indent=1))
-    print(f"data {args.data_dir.name} (DeltaBot label); train/val/test {results['n']} (OPs {results['n_ops']}); delta rate { {k: round(v, 3) for k, v in results['delta_rate'].items()} }")
-    print(f"{'model':27s} {'valAUROC':>8s} {'testAUROC':>9s} {'AUROC 95% CI (OP)':>19s} {'PR-AUC':>7s} {'PR 95% CI':>15s} {'bal.acc':>7s} {'macroF1':>7s}  chosen")
-    m = results["majority_class"]["test"]
-    print(f"{'majority class':27s} {'-':>8s} {m['auroc']:9.3f} {'-':>19s} {m['pr_auc']:7.3f} {'-':>15s} {m['balanced_accuracy']:7.3f} {m['macro_f1']:7.3f}")
-    for name in ("post_time", "post_length", "bow_tfidf", "liwc_only", "receptiviti_only", "liwc_receptiviti_all", "bow_plus_liwc_receptiviti"):
-        r = results[name]
-        a, p = r["test_ci95"]["auroc"], r["test_ci95"]["pr_auc"]
-        print(f"{name:27s} {r['val']['auroc']:8.3f} {r['test']['auroc']:9.3f} {f'[{a[0]:.3f},{a[1]:.3f}]':>19s} {r['test']['pr_auc']:7.3f} {f'[{p[0]:.3f},{p[1]:.3f}]':>15s} "
-              f"{r['test']['balanced_accuracy']:7.3f} {r['test']['macro_f1']:7.3f}  {r['penalty']} C={r['C']}")
+    print_results(results)
 
 
 if __name__ == "__main__":
