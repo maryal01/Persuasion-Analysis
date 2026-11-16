@@ -1,10 +1,13 @@
 """T1 link-bias analysis of the trained CMV ModernBERT model (no retraining).
 
 Question: is the frozen model sensitive to URL presence or content, i.e. could links be a shortcut
-in its persuasion predictions? Two stages, both on the pinned `cmv` test split:
+in its persuasion predictions? Three stages, all on the pinned `cmv` test split:
 
-  observe    Experiment A (observational). Reuses the cached scores from
-             scripts/t1_t2/cmv_scores.py (outputs/cmv_length/predictions.csv). Groups pairs
+  score      Scores every test reply with the published model
+             (nlp-final-project11/nlp-project-modernbert-cmv), checks that this reproduces the
+             published 66.1% pairwise accuracy / 0.629 AUROC, and caches per-reply scores and numeric
+             features (no text) in --cache-dir. Run once; the other stages read the cache.
+  observe    Experiment A (observational). Groups pairs
              by which reply has a URL (neither / both / delta only / no-delta only), and reports pairwise
              accuracy with post-cluster bootstrap CIs, the joint view with length matching (word ratio
              >= 0.80), possible confounders per group, and the URL/label association in each split.
@@ -14,6 +17,7 @@ in its persuasion predictions? Two stages, both on the pinned `cmv` test split:
              pairwise-accuracy changes with paired post-cluster bootstrap CIs.
 
 Usage:
+  python scripts/t1_t2/evaluate_cmv_links.py score     --cache-dir outputs/cmv_length
   python scripts/t1_t2/evaluate_cmv_links.py observe   --out-dir outputs/cmv_links
   python scripts/t1_t2/evaluate_cmv_links.py intervene --out-dir outputs/cmv_links
 
@@ -27,8 +31,12 @@ Not detected: bare domains without scheme or www (e.g. "example.com"), relative 
 ("/r/...", "](/u/...)"), and URLs broken by whitespace.
 
 Scoring mirrors scripts/train_delta.py: tok(original, reply, truncation="longest_first",
-max_length=4096), score = logit[delta] - logit[nodelta]. Outputs hold ids and numbers only; reply text
-is written only with `intervene --export-flip-text`, and only into a git-ignored directory.
+max_length=4096), score = logit[delta] - logit[nodelta], with label ids read from the model config.
+Pairs are matched by the dataset's `pair_id` column, never by row order, and the headline metrics
+reuse `pairwise_accuracy` and `binary_auroc` from scripts/train_delta.py. Outputs hold ids and numbers
+only; reply text is written only with `intervene --export-flip-text`, and only into a git-ignored
+directory. The Hub token is read from the environment (HF_TOKEN) by huggingface_hub and is never
+printed or stored.
 """
 
 from __future__ import annotations
@@ -41,17 +49,43 @@ import argparse
 import csv
 import difflib
 import json
+import platform
 import re
+import subprocess
 import sys
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import cmv_scores as cb  # noqa: E402  (pinned revisions, pairing, bootstrap and scoring helpers)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from train_delta import binary_auroc, pairwise_accuracy  # noqa: E402  (team metric definitions)
+
+DATASET_REPO = "nlp-final-project11/persuasion-datasets"
+DATASET_CONFIG = "cmv"
+# t1-t2 branch head on 2026-11-09; the cmv config last changed 2026-10-26, before the model upload
+DATASET_REVISION = "e236e8d98785ad4c80a3af422c656061f373f825"
+MODEL_REPO = "nlp-final-project11/nlp-project-modernbert-cmv"
+# main head on 2026-11-09 (adds only the model card to the 2026-10-27 weights upload e4c86c70)
+MODEL_REVISION = "407888b2c6395a52498173ab686b91fdce3f9b73"
+MAX_LENGTH = 4096  # as scripts/train_delta.py and the model card
+PUBLISHED_PAIRWISE_ACC = 0.661  # RESULTS.md, rounded to 0.1 points
+PUBLISHED_AUROC = 0.629  # RESULTS.md, rounded to 0.001
+PAIRWISE_TOLERANCE = 0.003  # 0.3 points, about 3 of 1,019 pairs
+AUROC_TOLERANCE = 0.005
+EXPECTED_TEST_PAIRS = 1019
+
+LINK_RE = re.compile(r"https?://|www\.|\]\(")
+QUOTE_LINE_RE = re.compile(r"^\s*(>|&gt;)", re.MULTILINE)
+
+PREDICTION_FIELDS = [
+    "row", "pair_id", "post_id", "label", "logit_nodelta", "logit_delta", "score",
+    "input_tokens", "truncated", "reply_words", "reply_chars", "reply_tokens", "original_tokens",
+    "n_links", "n_quote_lines",
+]
 
 PLACEHOLDER = "URL"
 URL_START = r"(?:https?://|www\.)"
@@ -69,7 +103,257 @@ REPRO_TOLERANCE = 1e-3  # max |rescored - cached| score for unedited replies
 
 
 # --------------------------------------------------------------------------------------------
-# URL detection and edits (pure, unit-tested)
+# Pairing and per-pair quantities (pure functions)
+# --------------------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Pair:
+    pair_id: int
+    post_id: str
+    delta_row: int
+    nodelta_row: int
+
+
+def build_pairs(pair_ids: Sequence[int], post_ids: Sequence[str], labels: Sequence[int],
+                delta_label: int) -> list[Pair]:
+    """Group rows by pair_id (row order is ignored). Raises ValueError unless every pair has exactly
+    one delta row and one no-delta row from the same post."""
+    rows_by_pair: dict[int, list[int]] = defaultdict(list)
+    for row, pair_id in enumerate(pair_ids):
+        rows_by_pair[int(pair_id)].append(row)
+    pairs, problems = [], []
+    for pair_id, rows in sorted(rows_by_pair.items()):
+        delta_rows = [r for r in rows if int(labels[r]) == delta_label]
+        other_rows = [r for r in rows if int(labels[r]) != delta_label]
+        if len(rows) != 2 or len(delta_rows) != 1 or len(other_rows) != 1:
+            problems.append(f"pair {pair_id}: {len(delta_rows)} delta / {len(other_rows)} other rows")
+            continue
+        if post_ids[delta_rows[0]] != post_ids[other_rows[0]]:
+            problems.append(f"pair {pair_id}: rows come from different posts")
+            continue
+        pairs.append(Pair(pair_id, str(post_ids[delta_rows[0]]), delta_rows[0], other_rows[0]))
+    if problems:
+        raise ValueError(f"{len(problems)} malformed pairs, e.g. " + "; ".join(problems[:5]))
+    return pairs
+
+
+def win_score(delta_values: np.ndarray, nodelta_values: np.ndarray) -> np.ndarray:
+    """1 where the delta side is larger, 0.5 on ties, 0 otherwise (the team's tie convention)."""
+    delta_values, nodelta_values = np.asarray(delta_values, float), np.asarray(nodelta_values, float)
+    return (delta_values > nodelta_values) + 0.5 * (delta_values == nodelta_values)
+
+
+def length_ratio(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Shorter / longer length, in [0, 1]; 1 when both are 0."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    longer = np.maximum(a, b)
+    return np.where(longer > 0, np.minimum(a, b) / np.where(longer > 0, longer, 1), 1.0)
+
+
+def cluster_bootstrap_means(cluster_ids: Sequence[str], columns: dict[str, np.ndarray],
+                            n_boot: int, seed: int, chunk: int = 2000) -> dict[str, np.ndarray]:
+    """Post-cluster bootstrap: resample clusters (posts) with replacement, keeping all of a post's
+    pairs together, and return n_boot replicate means of each per-pair column."""
+    unique, inverse = np.unique(np.asarray(cluster_ids), return_inverse=True)
+    n_clusters = len(unique)
+    counts = np.bincount(inverse, minlength=n_clusters).astype(float)
+    sums = {k: np.bincount(inverse, weights=np.asarray(v, float), minlength=n_clusters)
+            for k, v in columns.items()}
+    rng = np.random.default_rng(seed)
+    out: dict[str, list[np.ndarray]] = {k: [] for k in columns}
+    for start in range(0, n_boot, chunk):
+        size = min(chunk, n_boot - start)
+        weights = rng.multinomial(n_clusters, np.full(n_clusters, 1 / n_clusters), size=size).astype(float)
+        denom = weights @ counts
+        for k in columns:
+            out[k].append((weights @ sums[k]) / denom)
+    return {k: np.concatenate(v) for k, v in out.items()}
+
+
+def percentile_ci(replicates: np.ndarray, level: float = 0.95) -> tuple[float, float]:
+    lo, hi = np.percentile(replicates, [(1 - level) / 2 * 100, (1 + level) / 2 * 100])
+    return float(lo), float(hi)
+
+
+def rank_average(x: np.ndarray) -> np.ndarray:
+    _, inverse, counts = np.unique(x, return_inverse=True, return_counts=True)
+    return (np.cumsum(counts) - (counts - 1) / 2)[inverse]
+
+
+def spearman(x: np.ndarray, y: np.ndarray) -> float:
+    return float(np.corrcoef(rank_average(np.asarray(x)), rank_average(np.asarray(y)))[0, 1])
+
+
+def text_features(reply: str) -> dict[str, int]:
+    return {"reply_words": len(reply.split()), "reply_chars": len(reply),
+            "n_links": len(LINK_RE.findall(reply)), "n_quote_lines": len(QUOTE_LINE_RE.findall(reply))}
+
+
+def is_git_ignored(path: Path) -> bool:
+    try:
+        return subprocess.run(["git", "check-ignore", "-q", str(path)], capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+
+# --------------------------------------------------------------------------------------------
+# Score the test split + reproduction check
+# --------------------------------------------------------------------------------------------
+
+def pick_device(requested: str):
+    import torch
+    if requested == "auto":
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        print("[DEVICE] MPS not available; falling back to CPU")
+        return torch.device("cpu")
+    return torch.device(requested)
+
+
+def score_rows(model, tok, originals: list[str], replies: list[str], rows: Sequence[int], device,
+               label_ids: tuple[int, int], log_every: int = 200) -> dict[int, tuple[float, float, int]]:
+    """Batch size 1 (no padding, exactly as each example was seen alone). Returns
+    {row: (logit_nodelta, logit_delta, n_input_tokens)}."""
+    import torch
+    nodelta_id, delta_id = label_ids
+    out = {}
+    start = time.time()
+    with torch.inference_mode():
+        for i, row in enumerate(rows, 1):
+            enc = tok(originals[row], replies[row], truncation="longest_first", max_length=MAX_LENGTH,
+                      return_tensors="pt")
+            logits = model(**{k: v.to(device) for k, v in enc.items()}).logits[0].float().cpu()
+            out[row] = (float(logits[nodelta_id]), float(logits[delta_id]), int(enc["input_ids"].shape[1]))
+            if log_every and (i % log_every == 0 or i == len(rows)):
+                print(f"  [{device.type}] {i}/{len(rows)} rows, {time.time() - start:.0f}s", flush=True)
+    return out
+
+
+def run_score(args: argparse.Namespace) -> int:
+    import torch
+    import transformers
+    from datasets import load_dataset
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+    out_dir = Path(args.cache_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    test = load_dataset(DATASET_REPO, DATASET_CONFIG, revision=args.dataset_revision, split="test")
+    originals, replies = list(test["original"]), list(test["reply"])
+    labels, pair_ids, post_ids = list(test["label"]), list(test["pair_id"]), list(test["post_id"])
+    dataset_names = test.features["label"].names
+
+    tok = AutoTokenizer.from_pretrained(MODEL_REPO, revision=args.model_revision)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        MODEL_REPO, revision=args.model_revision, dtype=torch.float32)
+    model.eval()
+
+    # label mapping from the model config, cross-checked against the dataset's ClassLabel
+    label2id = {k.lower(): int(v) for k, v in model.config.label2id.items()}
+    delta_id, nodelta_id = label2id["delta"], label2id["nodelta"]
+    if dataset_names[delta_id] != "delta" or dataset_names[nodelta_id] != "nodelta":
+        raise ValueError(f"label mismatch: model {model.config.label2id} vs dataset {dataset_names}")
+
+    pairs = build_pairs(pair_ids, post_ids, labels, delta_label=delta_id)
+    print(f"[DATA] {len(test)} rows, {len(pairs)} pairs, {len(set(post_ids))} posts "
+          f"(dataset {args.dataset_revision[:8]}, model {args.model_revision[:8]})")
+    full_run = args.limit_pairs is None
+    if not full_run:
+        pairs = pairs[: args.limit_pairs]
+        print(f"[DATA] --limit-pairs {args.limit_pairs}: smoke run, the reproduction check is skipped")
+    elif len(pairs) != EXPECTED_TEST_PAIRS:
+        print(f"[WARN] expected {EXPECTED_TEST_PAIRS} pairs, found {len(pairs)}")
+    rows = sorted(r for p in pairs for r in (p.delta_row, p.nodelta_row))
+
+    device = pick_device(args.device)
+    print(f"[DEVICE] {device}; torch {torch.__version__}, transformers {transformers.__version__}")
+    model.to(device)
+    t0 = time.time()
+    scored = score_rows(model, tok, originals, replies, rows, device, (nodelta_id, delta_id))
+    elapsed = time.time() - t0
+
+    # Cross-device check: re-score a random sample on CPU and compare with the MPS scores
+    device_check = None
+    if device.type != "cpu" and args.cpu_check_rows > 0:
+        sample = sorted(np.random.default_rng(0).choice(rows, size=min(args.cpu_check_rows, len(rows)),
+                                                        replace=False).tolist())
+        print(f"[CHECK] re-scoring {len(sample)} random rows on CPU")
+        model.to("cpu")
+        cpu = score_rows(model, tok, originals, replies, sample, torch.device("cpu"),
+                         (nodelta_id, delta_id), log_every=0)
+        diffs = [abs((scored[r][1] - scored[r][0]) - (cpu[r][1] - cpu[r][0])) for r in sample]
+        device_check = {"rows": len(sample), "max_abs_score_diff": float(max(diffs)),
+                        "mean_abs_score_diff": float(np.mean(diffs))}
+        print(f"[CHECK] |score(mps) - score(cpu)|: max {device_check['max_abs_score_diff']:.2e}, "
+              f"mean {device_check['mean_abs_score_diff']:.2e}")
+
+    reply_tokens = [len(x) for x in tok([replies[r] for r in rows], add_special_tokens=False)["input_ids"]]
+    original_tokens = [len(x) for x in tok([originals[r] for r in rows], add_special_tokens=False)["input_ids"]]
+    records = []
+    for r, n_reply_tok, n_orig_tok in zip(rows, reply_tokens, original_tokens):
+        logit_n, logit_d, n_input = scored[r]
+        full_len = n_reply_tok + n_orig_tok + 3  # [CLS] original [SEP] reply [SEP]
+        records.append({"row": r, "pair_id": int(pair_ids[r]), "post_id": post_ids[r], "label": int(labels[r]),
+                        "logit_nodelta": logit_n, "logit_delta": logit_d, "score": logit_d - logit_n,
+                        "input_tokens": n_input, "truncated": int(full_len > MAX_LENGTH),
+                        "reply_tokens": n_reply_tok, "original_tokens": n_orig_tok, **text_features(replies[r])})
+    with open(out_dir / "predictions.csv", "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=PREDICTION_FIELDS)
+        writer.writeheader()
+        writer.writerows({k: rec[k] for k in PREDICTION_FIELDS} for rec in records)
+
+    # Headline metrics with the team's own functions, plus an independent per-pair recount
+    scores = np.array([rec["score"] for rec in records])
+    rec_labels = np.array([rec["label"] for rec in records])
+    team_pairwise = pairwise_accuracy(scores, (rec_labels == delta_id).astype(int), [rec["pair_id"] for rec in records])
+    team_auroc = binary_auroc(scores, (rec_labels == delta_id).astype(int))
+    by_row = {rec["row"]: rec["score"] for rec in records}
+    recount = float(np.mean(win_score([by_row[p.delta_row] for p in pairs], [by_row[p.nodelta_row] for p in pairs])))
+    if abs(recount - team_pairwise) > 1e-12:
+        raise AssertionError(f"pair recount {recount} disagrees with train_delta.pairwise_accuracy {team_pairwise}")
+    preds = np.array([rec["logit_delta"] > rec["logit_nodelta"] for rec in records])
+    truth = rec_labels == delta_id
+
+    acc_ok = abs(team_pairwise - PUBLISHED_PAIRWISE_ACC) <= PAIRWISE_TOLERANCE
+    auroc_ok = abs(team_auroc - PUBLISHED_AUROC) <= AUROC_TOLERANCE
+    result = {
+        "passed": bool(full_run and acc_ok and auroc_ok),
+        "full_run": full_run,
+        "pairs": len(pairs), "rows": len(records), "posts": len({p.post_id for p in pairs}),
+        "pairwise_acc": team_pairwise, "auroc": team_auroc,
+        "published_pairwise_acc": PUBLISHED_PAIRWISE_ACC, "published_auroc": PUBLISHED_AUROC,
+        "pairwise_tolerance": PAIRWISE_TOLERANCE, "auroc_tolerance": AUROC_TOLERANCE,
+        "row_accuracy": float((preds == truth).mean()),
+        "share_predicted_delta": float(preds.mean()),
+        "truncated_rows": int(sum(rec["truncated"] for rec in records)),
+        "device": str(device), "device_check": device_check, "inference_seconds": round(elapsed, 1),
+        "dataset": {"repo": DATASET_REPO, "config": DATASET_CONFIG, "revision": args.dataset_revision},
+        "model": {"repo": MODEL_REPO, "revision": args.model_revision, "label2id": model.config.label2id},
+        "max_length": MAX_LENGTH,
+        "versions": {"python": platform.python_version(), "torch": torch.__version__,
+                     "transformers": transformers.__version__},
+    }
+    (out_dir / "reproduction.json").write_text(json.dumps(result, indent=2))
+
+    print("\n=== REPRODUCTION CHECK ===")
+    print(f"  pairwise acc : {team_pairwise:.4f}  (published {PUBLISHED_PAIRWISE_ACC:.3f}, "
+          f"tolerance ±{PAIRWISE_TOLERANCE:.3f}) -> {'OK' if acc_ok else 'MISMATCH'}")
+    print(f"  AUROC        : {team_auroc:.4f}  (published {PUBLISHED_AUROC:.3f}, "
+          f"tolerance ±{AUROC_TOLERANCE:.3f}) -> {'OK' if auroc_ok else 'MISMATCH'}")
+    print(f"  row accuracy : {result['row_accuracy']:.4f}; predicted delta for {result['share_predicted_delta']:.1%} of rows")
+    print(f"  pairs {len(pairs)}, posts {result['posts']}, truncated rows {result['truncated_rows']}, "
+          f"inference {elapsed:.0f}s on {device}")
+    print(f"  wrote {out_dir / 'predictions.csv'} and {out_dir / 'reproduction.json'}")
+    if not full_run:
+        print("  RESULT: smoke run only (not a reproduction)")
+        return 0
+    print(f"  RESULT: {'PASSED' if result['passed'] else 'FAILED; investigate before using the cached scores'}")
+    return 0 if result["passed"] else 1
+
+
+# --------------------------------------------------------------------------------------------
+# URL detection and edits (pure functions)
 # --------------------------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -198,7 +482,7 @@ def group_mean_replicates(clusters: Sequence[str], values: np.ndarray, member: n
     """Post-cluster bootstrap replicates of mean(values[member]) when the bootstrap resamples all
     clusters (so a group's size varies across replicates). nan where a replicate has no members."""
     member = np.asarray(member, float)
-    b = cb.cluster_bootstrap_means(clusters, {"num": np.asarray(values, float) * member, "den": member},
+    b = cluster_bootstrap_means(clusters, {"num": np.asarray(values, float) * member, "den": member},
                                     n_boot, seed)
     with np.errstate(invalid="ignore", divide="ignore"):
         return np.where(b["den"] > 0, b["num"] / np.where(b["den"] > 0, b["den"], 1), np.nan)
@@ -206,7 +490,7 @@ def group_mean_replicates(clusters: Sequence[str], values: np.ndarray, member: n
 
 def nan_ci(replicates: np.ndarray) -> tuple[float, float]:
     r = replicates[~np.isnan(replicates)]
-    return cb.percentile_ci(r) if len(r) else (float("nan"), float("nan"))
+    return percentile_ci(r) if len(r) else (float("nan"), float("nan"))
 
 
 # --------------------------------------------------------------------------------------------
@@ -214,12 +498,12 @@ def nan_ci(replicates: np.ndarray) -> tuple[float, float]:
 # --------------------------------------------------------------------------------------------
 
 def load_test_with_cache(cache_dir: Path):
-    """Test split at the revision recorded by cmv_scores.py, its cached scores, and verified pairs."""
+    """Test split at the revision recorded by the `score` stage, its cached scores, and verified pairs."""
     from datasets import load_dataset
     meta = json.loads((cache_dir / "reproduction.json").read_text())
     if not meta.get("passed"):
-        raise SystemExit(f"[STOP] {cache_dir}/reproduction.json did not pass; rerun scripts/t1_t2/cmv_scores.py")
-    test = load_dataset(cb.DATASET_REPO, cb.DATASET_CONFIG, revision=meta["dataset"]["revision"], split="test")
+        raise SystemExit(f"[STOP] {cache_dir}/reproduction.json did not pass; rerun the `score` stage")
+    test = load_dataset(DATASET_REPO, DATASET_CONFIG, revision=meta["dataset"]["revision"], split="test")
     replies, originals = list(test["reply"]), list(test["original"])
     labels, pair_ids, post_ids = list(test["label"]), list(test["pair_id"]), list(test["post_id"])
     delta_id = int({k.lower(): v for k, v in meta["model"]["label2id"].items()}["delta"])
@@ -231,7 +515,7 @@ def load_test_with_cache(cache_dir: Path):
         if (int(rec["pair_id"]) != pair_ids[row] or int(rec["label"]) != labels[row]
                 or int(rec["reply_chars"]) != len(replies[row]) or int(rec["reply_words"]) != len(replies[row].split())):
             raise SystemExit(f"[STOP] cached row {row} does not match the dataset")
-    pairs = cb.build_pairs(pair_ids, post_ids, labels, delta_label=delta_id)
+    pairs = build_pairs(pair_ids, post_ids, labels, delta_label=delta_id)
     return meta, test, originals, replies, cached, pairs, delta_id
 
 
@@ -248,9 +532,9 @@ def pair_arrays(pairs, cached, replies) -> dict[str, np.ndarray]:
         t[f"{side}_n_urls"] = np.array([len(s) for s in spans], float)
         t[f"{side}_has_url"] = t[f"{side}_n_urls"] > 0
     t["category"] = np.array([link_category(a, b) for a, b in zip(t["d_has_url"], t["n_has_url"])])
-    t["model_win"] = cb.win_score(t["d_score"], t["n_score"])
-    t["longer_win"] = cb.win_score(t["d_reply_words"], t["n_reply_words"])
-    t["word_ratio"] = cb.length_ratio(t["d_reply_words"], t["n_reply_words"])
+    t["model_win"] = win_score(t["d_score"], t["n_score"])
+    t["longer_win"] = win_score(t["d_reply_words"], t["n_reply_words"])
+    t["word_ratio"] = length_ratio(t["d_reply_words"], t["n_reply_words"])
     return t
 
 
@@ -260,10 +544,10 @@ def acc_row(name: str, mask: np.ndarray, t: dict, n_boot: int, seed: int) -> dic
     if not row["pairs"]:
         return row
     m, b = t["model_win"][mask], t["longer_win"][mask]
-    boot = cb.cluster_bootstrap_means(t["post_id"][mask], {"m": m, "b": b, "d": m - b}, n_boot, seed)
-    row.update(model_acc=float(m.mean()), model_ci=cb.percentile_ci(boot["m"]),
-               longer_acc=float(b.mean()), longer_ci=cb.percentile_ci(boot["b"]),
-               diff=float(m.mean() - b.mean()), diff_ci=cb.percentile_ci(boot["d"]))
+    boot = cluster_bootstrap_means(t["post_id"][mask], {"m": m, "b": b, "d": m - b}, n_boot, seed)
+    row.update(model_acc=float(m.mean()), model_ci=percentile_ci(boot["m"]),
+               longer_acc=float(b.mean()), longer_ci=percentile_ci(boot["b"]),
+               diff=float(m.mean() - b.mean()), diff_ci=percentile_ci(boot["d"]))
     return row
 
 
@@ -352,7 +636,7 @@ def run_observe(args: argparse.Namespace) -> int:
     split_rates = {}
     revision = meta["dataset"]["revision"]
     for split in ("train", "validation", "test"):
-        ds = load_dataset(cb.DATASET_REPO, cb.DATASET_CONFIG, revision=revision, split=split)
+        ds = load_dataset(DATASET_REPO, DATASET_CONFIG, revision=revision, split=split)
         has = np.array([bool(find_url_spans(r)) for r in ds["reply"]])
         lab = np.array(list(ds["label"]))
         split_rates[split] = {"replies": int(len(lab)),
@@ -429,21 +713,21 @@ def run_intervene(args: argparse.Namespace) -> int:
           f"and contains no detected URL")
 
     rev = meta["model"]["revision"]
-    tok = AutoTokenizer.from_pretrained(cb.MODEL_REPO, revision=rev)
-    model = AutoModelForSequenceClassification.from_pretrained(cb.MODEL_REPO, revision=rev, dtype=torch.float32).eval()
+    tok = AutoTokenizer.from_pretrained(MODEL_REPO, revision=rev)
+    model = AutoModelForSequenceClassification.from_pretrained(MODEL_REPO, revision=rev, dtype=torch.float32).eval()
     label2id = {k.lower(): int(v) for k, v in model.config.label2id.items()}
     label_ids = (label2id["nodelta"], label2id["delta"])
-    device = cb.pick_device(args.device)
+    device = pick_device(args.device)
     model.to(device)
     print(f"[DEVICE] {device}")
 
     t0 = time.time()
-    rescored = cb.score_rows(model, tok, originals, replies, url_rows, device, label_ids)
+    rescored = score_rows(model, tok, originals, replies, url_rows, device, label_ids)
     repro_diff = max(abs((d - n) - float(cached[r]["score"])) for r, (n, d, _) in rescored.items())
     print(f"[CHECK] unedited URL replies rescored: max |score - cached| = {repro_diff:.2e}")
     if repro_diff > REPRO_TOLERANCE:
         raise SystemExit(f"[STOP] original predictions not reproduced (tolerance {REPRO_TOLERANCE})")
-    edited_scores = {v: cb.score_rows(model, tok, originals, variants[v], url_rows, device, label_ids) for v in VARIANTS}
+    edited_scores = {v: score_rows(model, tok, originals, variants[v], url_rows, device, label_ids) for v in VARIANTS}
     elapsed = time.time() - t0
 
     def n_tokens(text_list: list[str], rows: list[int]) -> dict[int, int]:
@@ -492,7 +776,7 @@ def run_intervene(args: argparse.Namespace) -> int:
         side_diff = (group_mean_replicates(clusters, change, is_delta, n_boot, seed)
                      - group_mean_replicates(clusters, change, ~is_delta, n_boot, seed))
         res["delta_minus_nodelta"] = {"diff": float(change[is_delta].mean() - change[~is_delta].mean()), "ci": nan_ci(side_diff)}
-        res["spearman_change_vs_tokens_removed"] = cb.spearman(change, removed)
+        res["spearman_change_vs_tokens_removed"] = spearman(change, removed)
         res["share_score_decreased"] = float((change < 0).mean())
         b1[v] = res
     metrics["reply_level"] = b1
@@ -507,7 +791,7 @@ def run_intervene(args: argparse.Namespace) -> int:
 
     # B2. pair level: accuracy change and preference flips, per scenario
     d_row, n_row = t["d_row"], t["n_row"]
-    win_before = cb.win_score(base[d_row], base[n_row])
+    win_before = win_score(base[d_row], base[n_row])
     gap_before = base[d_row] - base[n_row]
     b2, flip_records = {}, []
     md += ["### B2. Pairwise accuracy after editing (paired post-cluster bootstrap)", "",
@@ -520,15 +804,15 @@ def run_intervene(args: argparse.Namespace) -> int:
             affected = {"edit all URL replies": t["d_has_url"] | t["n_has_url"],
                         "edit delta reply only": t["d_has_url"],
                         "edit no-delta reply only": t["n_has_url"]}[scen]
-            win_after = cb.win_score(d_s, n_s)
+            win_after = win_score(d_s, n_s)
             gap_after = d_s - n_s
             flip = np.sign(gap_after) != np.sign(gap_before)
             res = {}
             for subset, m in (("all pairs", np.ones(len(pairs), bool)), ("affected pairs", affected)):
-                boot = cb.cluster_bootstrap_means(t["post_id"][m], {"chg": win_after[m] - win_before[m]}, n_boot, seed)
+                boot = cluster_bootstrap_means(t["post_id"][m], {"chg": win_after[m] - win_before[m]}, n_boot, seed)
                 res[subset] = {"pairs": int(m.sum()), "acc_before": float(win_before[m].mean()),
                                "acc_after": float(win_after[m].mean()),
-                               "change": float((win_after[m] - win_before[m]).mean()), "change_ci": cb.percentile_ci(boot["chg"]),
+                               "change": float((win_after[m] - win_before[m]).mean()), "change_ci": percentile_ci(boot["chg"]),
                                "flips": int(flip[m].sum()), "correct_to_wrong": int((flip & (win_before == 1))[m].sum()),
                                "wrong_to_correct": int((flip & (win_before == 0))[m].sum())}
                 r = res[subset]
@@ -540,9 +824,9 @@ def run_intervene(args: argparse.Namespace) -> int:
                 cat_rows = {}
                 for c in CATEGORIES[1:]:
                     m = t["category"] == c
-                    boot = cb.cluster_bootstrap_means(t["post_id"][m], {"chg": win_after[m] - win_before[m]}, n_boot, seed)
+                    boot = cluster_bootstrap_means(t["post_id"][m], {"chg": win_after[m] - win_before[m]}, n_boot, seed)
                     cat_rows[c] = {"pairs": int(m.sum()), "acc_before": float(win_before[m].mean()),
-                                   "acc_after": float(win_after[m].mean()), "change_ci": cb.percentile_ci(boot["chg"]),
+                                   "acc_after": float(win_after[m].mean()), "change_ci": percentile_ci(boot["chg"]),
                                    "flips": int(flip[m].sum()),
                                    "correct_to_wrong": int((flip & (win_before == 1))[m].sum()),
                                    "wrong_to_correct": int((flip & (win_before == 0))[m].sum())}
@@ -581,7 +865,7 @@ def run_intervene(args: argparse.Namespace) -> int:
 
     if args.export_flip_text and flip_records:
         target = out_dir / "flips_text.jsonl"
-        if not cb.is_git_ignored(target):
+        if not is_git_ignored(target):
             print(f"[STOP] {target} is not git-ignored; refusing to write private text there")
             return 2
         by_id = {p.pair_id: p for p in pairs}
@@ -606,25 +890,32 @@ def run_intervene(args: argparse.Namespace) -> int:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="stage", required=True)
+    s = sub.add_parser("score", help="score the test split with the published model and cache the scores")
+    s.add_argument("--cache-dir", default="outputs/cmv_length", help="git-ignored directory the scores are written to (default: %(default)s)")
+    s.add_argument("--dataset-revision", default=DATASET_REVISION, help="dataset commit (default: pinned)")
+    s.add_argument("--model-revision", default=MODEL_REVISION, help="model commit (default: pinned)")
+    s.add_argument("--device", default="auto", choices=["auto", "mps", "cpu"], help="auto = MPS if available, else CPU")
+    s.add_argument("--cpu-check-rows", type=int, default=40, help="rows re-scored on CPU to compare devices (0 = skip)")
+    s.add_argument("--limit-pairs", type=int, default=None, help="smoke run on the first N pairs (no reproduction check)")
     for name, help_text in (("observe", "Experiment A: observational link analysis (cached scores)"),
                             ("intervene", "Experiment B: score URL-edited replies")):
         p = sub.add_parser(name, help=help_text)
         p.add_argument("--out-dir", default="outputs/cmv_links", help="git-ignored output directory (default: %(default)s)")
-        p.add_argument("--cache-dir", default="outputs/cmv_length", help="cached baseline scores from cmv_scores.py, read only (default: %(default)s)")
+        p.add_argument("--cache-dir", default="outputs/cmv_length", help="cached scores from the score stage, read only (default: %(default)s)")
         p.add_argument("--n-boot", type=int, default=10000, help="post-cluster bootstrap resamples (default: %(default)s)")
         p.add_argument("--seed", type=int, default=577, help="bootstrap seed (default: %(default)s)")
         if name == "intervene":
             p.add_argument("--device", default="auto", choices=["auto", "mps", "cpu"], help="auto = MPS if available, else CPU")
             p.add_argument("--export-flip-text", action="store_true", help="write flipped pairs' text (git-ignored dir only)")
     args = ap.parse_args(argv)
-    if Path(args.out_dir).resolve() == Path(args.cache_dir).resolve():
-        ap.error("--out-dir must differ from --cache-dir (the cached baseline scores are read only)")
+    if args.stage != "score" and Path(args.out_dir).resolve() == Path(args.cache_dir).resolve():
+        ap.error("--out-dir must differ from --cache-dir (the cached scores are read only)")
     return args
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    return run_observe(args) if args.stage == "observe" else run_intervene(args)
+    return {"score": run_score, "observe": run_observe, "intervene": run_intervene}[args.stage](args)
 
 
 if __name__ == "__main__":
