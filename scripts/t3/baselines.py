@@ -61,7 +61,7 @@ Interval = Tuple[float, float]
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Majority, random and TF-IDF baselines for T3 audience profiling.")
     ap.add_argument("--dataset-repo", default="nlp-final-project11/persuasion-datasets")
-    ap.add_argument("--dataset-revision", default="t3", help="branch of the dataset repo (default: %(default)s)")
+    ap.add_argument("--dataset-revision", default="main", help="branch of the dataset repo (default: %(default)s)")
     ap.add_argument("--users-config", default="ddo_users", help="one row per user, with the labels")
     ap.add_argument("--history-config", default="ddo_history", help="one row per thing a user did")
     ap.add_argument("--all-debates", action="store_true",

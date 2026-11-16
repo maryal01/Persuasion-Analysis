@@ -6,7 +6,7 @@
 
 How well can a simple model predict a DDO user's self-reported stance from what they wrote? These are
 the reference rows for the T3 ModernBERT model, on the dataset from PR #27 (`ddo_users` and
-`ddo_history`, Hub branch `t3`).
+`ddo_history`, Hub branch `main`).
 
 ## What it does
 
@@ -101,8 +101,9 @@ The full output, with all four models, both metrics and the confusion matrices, 
 - **About 10% of labelled users have no usable text** (for example 1,207 of 13,070 for economy). They
   are not scored. A text model cannot profile them, or the T2 voters who only voted.
 - **Votes are not used.** Vote rows dated before about September 2008 are stored as "tied before and
-  after", although that form most likely never asked (see PR #24). PR #28 empties their side fields
-  in `ddo_history`; votes can be used as a feature once the table is rebuilt.
+  after", although that form most likely never asked (see PR #24). PR #28 emptied their side fields
+  in `ddo_history`, and the table on the Hub was rebuilt with it on 2026-11-16, so votes can be used
+  as a feature later. A re-run on the rebuilt table, read from `main`, gave identical numbers.
 - **One run, no seeds.** Logistic regression is deterministic here; the intervals cover the choice of
   test users only.
 - **Not in `RESULTS.md` or the `AGENTS.md` status table yet.** Both are changed by open PRs (#22,
