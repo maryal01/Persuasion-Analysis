@@ -1,0 +1,143 @@
+{
+  "_about": "T3 DDO audience profiling: issue-to-dimension mapping, issue polarity and ideology groupings. Read by scripts/t3/build_dataset.py. Every issue and every observed ideology value is listed; the builder stops if the raw data has a value this file does not cover.",
+  "scoring": {
+    "answer_values": {"Pro": "pro_polarity", "Con": "-pro_polarity", "Und": 0, "N/O": null, "N/S": null},
+    "answered": "Pro, Con and Und count as answered; N/O (no opinion) and N/S (not saying) do not",
+    "score": "mean of the answered issues' values, in [-1, 1]",
+    "min_answered": 2,
+    "classes": "score <= -1/3 -> first class; score >= +1/3 -> last class; otherwise 'mixed'. Compared exactly as 3*sum <= -n and 3*sum >= n.",
+    "missing": "label and score are null when fewer than min_answered issues are answered, and for users without a users.json record"
+  },
+  "dimensions": {
+    "economy": {
+      "classes": ["left", "mixed", "right"],
+      "positive_pole": "right: free-market, lower taxes and spending",
+      "issues": {
+        "Capitalism":                {"pro_polarity": 1,  "why": "Pro capitalism = market economy"},
+        "Socialism":                 {"pro_polarity": -1, "why": "Pro socialism = left"},
+        "Minimum Wage":              {"pro_polarity": -1, "why": "Pro wage floor = intervention"},
+        "Progressive Tax":           {"pro_polarity": -1, "why": "Pro progressive taxation = redistributive"},
+        "Flat Tax":                  {"pro_polarity": 1,  "why": "Pro flat tax = anti-redistributive"},
+        "Estate Tax":                {"pro_polarity": -1, "why": "Pro estate tax = redistributive"},
+        "Redistribution":            {"pro_polarity": -1, "why": "Pro redistribution = left"},
+        "Welfare":                   {"pro_polarity": -1, "why": "Pro welfare = left"},
+        "Social Programs":           {"pro_polarity": -1, "why": "Pro social programs = left"},
+        "Social Security":           {"pro_polarity": -1, "why": "Pro public pensions = left (ambiguous: popular across parties)"},
+        "Medicaid & Medicare":       {"pro_polarity": -1, "why": "Pro public health insurance = left"},
+        "National Health Care":      {"pro_polarity": -1, "why": "Pro single-payer care = left"},
+        "Stimulus Spending":         {"pro_polarity": -1, "why": "Pro fiscal stimulus = left"},
+        "Labor Union":               {"pro_polarity": -1, "why": "Pro unions = left"},
+        "Occupy Movement":           {"pro_polarity": -1, "why": "Pro Occupy = left (anti-inequality protest)"},
+        "Environmental Protection":  {"pro_polarity": -1, "why": "Pro environmental regulation = market intervention (ambiguous: could be social)"}
+      }
+    },
+    "social_issues": {
+      "classes": ["liberal", "mixed", "conservative"],
+      "positive_pole": "conservative: traditional values, stricter immigration and punishment",
+      "issues": {
+        "Abortion":            {"pro_polarity": -1, "why": "Pro abortion rights = liberal"},
+        "Gay Marriage":        {"pro_polarity": -1, "why": "Pro same-sex marriage = liberal"},
+        "Civil Unions":        {"pro_polarity": -1, "why": "Pro civil unions = liberal"},
+        "Affirmative Action":  {"pro_polarity": -1, "why": "Pro affirmative action = liberal"},
+        "Death Penalty":       {"pro_polarity": 1,  "why": "Pro death penalty = conservative"},
+        "Border Fence":        {"pro_polarity": 1,  "why": "Pro border fence = restrictive immigration"}
+      }
+    },
+    "personal_liberties": {
+      "classes": ["restrictive", "mixed", "permissive"],
+      "positive_pole": "permissive: individual choice over state restriction, regardless of left/right",
+      "issues": {
+        "Drug Legalization":      {"pro_polarity": 1,  "why": "Pro legalization = permissive"},
+        "Medical Marijuana":      {"pro_polarity": 1,  "why": "Pro medical marijuana = permissive"},
+        "Legalized Prostitution": {"pro_polarity": 1,  "why": "Pro legal prostitution = permissive"},
+        "Euthanasia":             {"pro_polarity": 1,  "why": "Pro right to die = permissive"},
+        "Gun Rights":             {"pro_polarity": 1,  "why": "Pro gun rights = permissive (right-coded, unlike the others)"},
+        "Homeschooling":          {"pro_polarity": 1,  "why": "Pro homeschooling = parental choice"},
+        "Smoking Ban":            {"pro_polarity": -1, "why": "Pro ban = restrictive"},
+        "Internet Censorship":    {"pro_polarity": -1, "why": "Pro censorship = restrictive"},
+        "Racial Profiling":       {"pro_polarity": -1, "why": "Pro profiling = less civil liberty"}
+      }
+    },
+    "foreign_policy": {
+      "classes": ["dovish", "mixed", "hawkish"],
+      "positive_pole": "hawkish: support for military force",
+      "issues": {
+        "Military Intervention": {"pro_polarity": 1, "why": "Pro intervention = hawkish"},
+        "War in Afghanistan":    {"pro_polarity": 1, "why": "Pro the war = hawkish"},
+        "War on Terror":         {"pro_polarity": 1, "why": "Pro the war on terror = hawkish"},
+        "Iran-Iraq War":         {"pro_polarity": 1, "why": "Pro the war = hawkish"},
+        "Torture":               {"pro_polarity": 1, "why": "Pro torture of detainees = hawkish security policy"}
+      }
+    }
+  },
+  "excluded_issues": {
+    "Barack Obama":          "a person, not a policy; partisan approval, not a dimension",
+    "Electoral College":     "institutional; no clear left/right or liberty pole",
+    "Term Limits":           "institutional; no clear pole",
+    "Federal Reserve":       "monetary institution; opposed from both the libertarian right and the left",
+    "Gold Standard":         "monetary; libertarian-coded but not on the economy scale's redistribution axis",
+    "Free Trade":            "split across left and right (populist right and union left both oppose)",
+    "Globalization":         "split across left and right",
+    "Global Warming Exists": "an empirical belief, not a policy stance",
+    "Animal Rights":         "weakly ideological; no agreed pole",
+    "European Union":        "internationalism, not hawk/dove; not US left/right",
+    "United Nations":        "internationalism, not hawk/dove",
+    "National Retail Sales Tax": "no consistent pole: on DDO its answers do not align with the economy dimension"
+  },
+  "issue_columns": "issue_<name>: name lower-cased, every run of characters other than a-z and 0-9 replaced by one underscore, trimmed (e.g. 'Medicaid & Medicare' -> issue_medicaid_medicare)",
+  "political_ideology_group": {
+    "classes": ["liberal", "conservative", "libertarian", "socialist", "other"],
+    "nominal": true,
+    "not_saying": "Not Saying",
+    "groups": {
+      "Liberal": "liberal",
+      "Progressive": "liberal",
+      "Green": "liberal",
+      "Labor": "liberal",
+      "Conservative": "conservative",
+      "Libertarian": "libertarian",
+      "Socialist": "socialist",
+      "Communist": "socialist",
+      "Moderate": "other",
+      "Undecided": "other",
+      "Apathetic": "other",
+      "Anarchist": "other",
+      "Other": "other"
+    },
+    "ambiguous": {
+      "Moderate": "a centrist answer merged into 'other' to stay within 5 classes; the raw value is kept in political_ideology",
+      "Anarchist": "covers anarcho-capitalists and anarcho-communists, so no direction",
+      "Green, Labor": "left parties of the centre-left, grouped with liberal rather than socialist"
+    }
+  },
+  "religion": {
+    "classes": ["christian", "other religion", "nonreligious", "other"],
+    "nominal": true,
+    "source": "religious_ideology (none of the 48 issues is about religion)",
+    "not_saying": "Not Saying",
+    "rules": [
+      {"match": "prefix", "value": "Christian", "group": "christian"},
+      {"match": "exact", "values": ["Atheist", "Agnostic", "Secular"], "group": "nonreligious"},
+      {"match": "exact", "values": ["Other", "Pastafarian", "Discordian", "Juche"], "group": "other"},
+      {"match": "exact", "values": [
+        "Hindu", "Hindu - Vaishnavism", "Hindu - Saivite", "Hindu - Smartha", "Hindu - Shakta",
+        "Muslim", "Muslim - Sunni", "Muslim - Shiite", "Muslim - Sufi", "Islamic",
+        "Jewish", "Jewish - Reform", "Jewish - Orthodox", "Jewish - Conservative",
+        "Buddhist", "Buddhist - Theravada", "Buddhist - Mahayana", "Buddhist - Vajrayana",
+        "Deism", "Pagan", "Neo-Paganism", "Wikkan", "Unitarian Universalist", "Scientology",
+        "Sikh", "Bah��", "Spiritism", "Taoism", "Daoist", "Jain", "Confucian", "Zoroastrianism",
+        "African Traditional & Diasporic", "Rastafarianism", "Shinto", "Primal-Indigenous", "Yazd�nism",
+        "Cao Dai", "B�bism", "Manichaeism", "Mazdakism", "Tenrikyo", "Zurvanism", "Mandaeism",
+        "Yazidi", "Alevi", "Yarsani"
+      ], "group": "other religion"}
+    ],
+    "ambiguous": {
+      "Pastafarian, Discordian": "parody religions (often used by atheists); put in 'other', not 'nonreligious', because the intent cannot be checked",
+      "Juche": "a state ideology, not a religion",
+      "Deism": "belief in a creator without a revealed religion; counted as 'other religion'",
+      "Secular": "counted as nonreligious",
+      "mojibake": "Bah�� (Baha'i), B�bism (Babism) and Yazd�nism (Yazdanism) are stored with U+FFFD replacement characters in users.json and are matched as stored"
+    },
+    "no_score": "religion is nominal: no religion_score and no religion_n column"
+  }
+}
