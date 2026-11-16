@@ -11,7 +11,7 @@ Usage (from the repository root; needs the `datasets` package and a Hugging Face
         --posts <cmv_dir>/posts_malleability.jsonl.bz2 --liwc <cmv_dir>/author_liwc.jsonl.bz2 \
         [--push] [--output-dir <dir>]
 <cmv_dir> holds the .jsonl.bz2 files of Webis-CMV-20 (https://zenodo.org/records/3778298).
---push uploads the config `cmv_malleability_liwc` to the Hub branch `t5` (created if missing); --output-dir also writes
+--push uploads the config `cmv_malleability_liwc` to the Hub branch `t5` (created if missing; the scripts read the copy on `main`); --output-dir also writes
 train/validation/test.jsonl, feature_names.json and stats.json.
 """
 import argparse
@@ -25,8 +25,9 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from datasets import Dataset, DatasetDict
 from huggingface_hub import HfApi
 
-from t5_data import HUB_CONFIG, HUB_REPO, HUB_REVISION, SPLIT_NAMES
+from t5_data import HUB_CONFIG, HUB_REPO, SPLIT_NAMES
 
+STAGING_REVISION = "t5"  # Hub branch that --push uploads to; copy the config to main afterwards (as for T2 and T3)
 SEED = 42  # same value and rule as split_of in create_dataset.py (T1/T2), applied to the OP here
 TEST_SIZE = 0.1
 VAL_SIZE = 0.1
@@ -188,7 +189,7 @@ def main() -> None:
     parser.add_argument("--posts", type=Path, required=True)
     parser.add_argument("--liwc", type=Path, required=True)
     parser.add_argument("--push", action="store_true", help=f"upload the config {HUB_CONFIG} to the Hub")
-    parser.add_argument("--hub-revision", default=HUB_REVISION, help="Hub branch to upload to (default: %(default)s)")
+    parser.add_argument("--hub-revision", default=STAGING_REVISION, help="Hub branch to upload to (default: %(default)s)")
     parser.add_argument("--output-dir", type=Path, default=None, help="also write a local copy here")
     args = parser.parse_args()
 

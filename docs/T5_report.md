@@ -8,7 +8,7 @@
 
 We split the dataset by author, ensuring that posts from the same OP never appear in different splits.
 
-The dataset is the config `cmv_malleability_liwc` (branch `t5`) of the Hub repo `nlp-final-project11/persuasion-datasets`. It holds the raw post text, the labels, the author, the time of the post and the 211 author features; the text cleaning described below is applied when the models read it.
+The dataset is the config `cmv_malleability_liwc` of the Hub repo `nlp-final-project11/persuasion-datasets`. It holds the raw post text, the labels, the author, the time of the post and the 211 author features; the text cleaning described below is applied when the models read it.
 
 | Split      | Posts | Delta rate |
 | ---------- | ----: | ---------: |

@@ -17,7 +17,7 @@ from t5_cleaning import clean_text
 
 HUB_REPO = "nlp-final-project11/persuasion-datasets"
 HUB_CONFIG = "cmv_malleability_liwc"
-HUB_REVISION = "t5"  # branch of the Hub repo
+HUB_REVISION = "main"  # branch of the Hub repo that the scripts read from
 SPLIT_NAMES = ("train", "validation", "test")
 
 
