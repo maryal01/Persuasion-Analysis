@@ -32,6 +32,11 @@ PRIVATE_FIELDS =("email", "birthday", "url", "friends", "ethnicity", "gender", "
                   "relationship", "interested", "looking", "elo_ranking", "percentile", "joined",
                   "last_online", "last_updated")
 DEFAULT_MAPPING = Path(__file__).resolve().parent / "dimensions.json"
+# Votes the corpus dates "10 years ago" were cast before about September 2008, under a voting form that
+# most likely did not ask for a stance: 98.9% of them are stored as tied before and after, against 2.3%
+# of the votes dated "9 years ago". T2 leaves the tied-before ones out of ddo_undecided (PR #24). Here
+# the vote row stays, with empty sides.
+OLD_FORM_VOTE_TIME = "10 years ago"
 
 
 # --------------------------------------------------------------------------------------------
@@ -211,7 +216,10 @@ def iter_debates(debates_path: Path) -> Iterator[tuple[str, dict]]:
 
 
 def debate_history(debate_id: str, d: dict, keep: Callable[[str], bool], counts: Counter) -> Iterator[dict]:
-    """debate_argument, vote and comment rows of one debate (T2's voter rules and stance())."""
+    """debate_argument, vote and comment rows of one debate (T2's voter rules and stance()).
+
+    A tied-before vote cast under the old voting form keeps its row but has no sides (OLD_FORM_VOTE_TIME).
+    """
     base = {"debate_id": debate_id, "title": (d.get("title") or "").strip(), "category": d.get("category") or None,
             "debate_date": d.get("start_date") or None}
     positions = {d.get("participant_1_name"): d.get("participant_1_position"),
@@ -236,8 +244,12 @@ def debate_history(debate_id: str, d: dict, keep: Callable[[str], bool], counts:
         seen.add(voter)
         if keep(voter):
             votes_map = v.get("votes_map") or {}
-            yield history_row(voter, "vote", "", side=cd.stance(votes_map, positions, cd.AFTER),
-                              side_before=cd.stance(votes_map, positions, cd.BEFORE), **base)
+            side = cd.stance(votes_map, positions, cd.AFTER)
+            side_before = cd.stance(votes_map, positions, cd.BEFORE)
+            if side_before == "Tie" and (v.get("time") or "").strip() == OLD_FORM_VOTE_TIME:
+                counts["votes_old_form_sides_emptied"] += 1
+                side = side_before = None
+            yield history_row(voter, "vote", "", side=side, side_before=side_before, **base)
     for c in d.get("comments", []):
         if keep(c.get("user_name")):
             yield history_row(c["user_name"], "comment", c.get("comment_text") or "", **base)
