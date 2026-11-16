@@ -38,46 +38,75 @@ Tan et al. (2016)'s 65.1% is on a different corpus.
 
 Not trained yet.
 
-## T5: Does the author of a CMV post award a delta?
+## T5: Predicting Whether a CMV Author Awards a Delta
 
-**Task.** For a post on r/changemyview, predict whether its author (the OP) gives at least one delta (∆) to a commenter, i.e. admits that their view changed.
+### Task and Dataset
 
-**Data.** 8,121 posts from the `posts_malleability` file of Webis-CMV-20, 2013-2017. Only authors with LIWC/Receptiviti features are kept (4,641 authors); this is the same sample as in Al-Khatib et al. (2020).
-Split by author, so one author is never in two sets: train 6,626 posts, validation 725, test 770. Share of posts where a delta was awarded: 63% / 67% / 67%.
+We predict whether the original poster (OP) of a Reddit Change My View (CMV) post awards at least one delta (∆), indicating that a commenter changed their view.
 
-**Label.** 1 if DeltaBot confirmed a delta that the author gave ("Confirmed: 1 delta awarded" under a comment of the author). T1 relies on the same kind of evidence.
-We do not use the `delta` field of the dataset: it comes from the post flair, which does not exist before March 2015 and is replaced by other flairs (Fresh Topic Friday, Election, ...) in some threads.
-On our 8,121 posts it misses 2,192 of the 5,179 posts that DeltaBot confirmed.
-The label is still a bit noisy: in 331 posts (4%) the author wrote ∆ but DeltaBot did not confirm it (132 were rejected, usually because the explanation was too short), and these are labeled 0.
-The share of delta posts grows over the years (53% in 2013, 76% in 2017), so the posting date is included as a baseline.
+We use **8,121 posts from 4,641 authors** in Webis-CMV-20 (2013–2017), selecting authors with available LIWC and Receptiviti features. The dataset is split by author to prevent the same OP from appearing in multiple splits.
 
-**Post text.** Before the models see it, we remove three things that are not part of the original argument: the moderator footnote that is added to threads, paragraphs the author added later that start with
-`Edit:` or `Update:`, and delta symbols (`scripts/t5/t5_common.py`, `clean_text`). This removes 20.8% of the characters. A few unusual edit lines (71 in 65 posts) remain.
+| Split      | Posts | Delta rate |
+| ---------- | ----: | ---------: |
+| Train      | 6,626 |        63% |
+| Validation |   725 |        67% |
+| Test       |   770 |        67% |
 
-**Models.** Logistic regression (a simple linear model) on a CPU, `scripts/t5/baselines.py`. The settings are chosen on the validation set. There is no ModernBERT result yet.
+**Labels:** Positive labels are based on DeltaBot-confirmed delta awards rather than the dataset's unreliable flair-based labels, which miss 2,192 confirmed positive posts.
 
-**Results on the test set (770 posts).**
-AUROC: 0.5 means guessing, 1.0 means perfect. The interval is a 95% bootstrap interval over authors. PR-AUC of a model that knows nothing is 0.668 (the share of delta posts in the test set).
-Balanced accuracy and macro-F1 are given instead of the F1 of the delta class, because "always delta" already gets a high F1 (delta posts are the majority).
+**Preprocessing:** We remove moderator footnotes, post-hoc `Edit/Update` paragraphs, and delta symbols to reduce information leakage.
 
-| Model | AUROC | 95% interval | PR-AUC | Balanced acc. | Macro-F1 |
-|---|---|---|---|---|---|
-| Always "delta" | 0.500 | – | 0.668 | 0.500 | 0.400 |
-| Posting date only | 0.589 | 0.543–0.634 | 0.731 | 0.553 | 0.540 |
-| Post length only | 0.500 | – | 0.668 | 0.500 | 0.400 |
-| Words of the post (bag of words) | 0.564 | 0.520–0.610 | 0.720 | 0.541 | 0.537 |
-| LIWC of the author (93 numbers) | 0.705 | 0.660–0.748 | 0.829 | 0.660 | 0.605 |
-| Receptiviti of the author (118 numbers) | **0.726** | 0.681–0.769 | 0.841 | 0.677 | 0.647 |
-| LIWC + Receptiviti | 0.718 | 0.672–0.766 | 0.835 | 0.667 | 0.611 |
-| Words + LIWC + Receptiviti | 0.718 | 0.672–0.766 | 0.835 | 0.667 | 0.611 |
+### Models
 
-**What this tells us.**
-- The author's traits (LIWC, Receptiviti) predict a delta clearly better (AUROC about 0.71-0.73) than the post text (0.56) or the date (0.59).
-- Post length has no signal. For the words, the best model on the validation set ignores all of them, so "Words + LIWC + Receptiviti" is the same as "LIWC + Receptiviti".
-- With 770 test posts the interval is about ±0.045, so LIWC, Receptiviti and both together cannot be ranked against each other.
-- Al-Khatib et al. (2020) report 0.52 for words and 0.62 for personality traits with the flair label and a different test set, so the numbers cannot be compared directly.
+We evaluate logistic regression baselines using post text (TF-IDF), posting date, post length, LIWC (93 linguistic features), Receptiviti (118 psycholinguistic features), and their combinations. Hyperparameters (L1/L2 regularization and C) are selected using validation AUROC.
 
-**Cautions.**
-- LIWC and Receptiviti are computed once per author from a lot of text (median 6,393 words, the paper says the first 1,000). This text can include posts written after the post we predict. We cannot check this with the released files, so the author results may be too optimistic.
-- The label noise above (4% of the posts) lowers all scores a little.
-- If the cleaning is not used, the words and the post length look better (words 0.603, length 0.560) because the footnote and the edits give away part of the outcome.
+We also fine-tune **ModernBERT-base** in two configurations:
+
+- **Post only:** ModernBERT encodes the current post, followed by mean pooling and classification.
+- **Post + author features:** ModernBERT text embeddings are concatenated with a learned 64-dimensional representation of the 211 LIWC/Receptiviti features.
+
+ModernBERT is trained for 3 epochs with an effective batch size of 32, learning rates of 2e-5 (encoder) and 1e-3 (new layers), and three random seeds. The best checkpoint is selected using validation AUROC.
+
+### Results
+
+All results are evaluated on the same 770-post test set. **AUROC is the primary metric** (0.5 = random ranking, 1.0 = perfect ranking). PR-AUC evaluates positive-class precision and recall, while balanced accuracy and macro-F1 account for class imbalance.
+
+ModernBERT results are reported as **mean ± standard deviation across three seeds**. The logistic regression results come from a single fitted model per configuration.
+
+| Model                                            |         AUROC |        PR-AUC | Balanced Acc. |      Macro-F1 |
+| ------------------------------------------------ | ------------: | ------------: | ------------: | ------------: |
+| Always predict delta                             |         0.500 |         0.668 |         0.500 |         0.400 |
+| Posting date only                                |         0.589 |         0.731 |         0.553 |         0.540 |
+| Post length only                                 |         0.500 |         0.668 |         0.500 |         0.400 |
+| Logistic Regression: post text (TF-IDF)          |         0.564 |         0.720 |         0.541 |         0.537 |
+| Logistic Regression: LIWC                        |         0.705 |         0.829 |         0.660 |         0.605 |
+| Logistic Regression: Receptiviti                 |     **0.726** |     **0.841** |     **0.677** |     **0.647** |
+| Logistic Regression: LIWC + Receptiviti          |         0.718 |         0.835 |         0.667 |         0.611 |
+| Logistic Regression: TF-IDF + LIWC + Receptiviti |         0.718 |         0.835 |         0.667 |         0.611 |
+| ModernBERT: post only                            | 0.593 ± 0.010 | 0.737 ± 0.007 | 0.565 ± 0.018 | 0.519 ± 0.046 |
+| ModernBERT: post + LIWC + Receptiviti            | 0.706 ± 0.002 | 0.834 ± 0.004 | 0.650 ± 0.010 | 0.626 ± 0.009 |
+
+The test-set positive rate is 66.8%, giving a no-skill PR-AUC of 0.668. Logistic regression AUROC confidence intervals were estimated using author-level bootstrap resampling and are provided in the [detailed T5 report](docs/T5_report.md).
+
+### Key Findings
+
+1. **Author features outperform post text.** LIWC and Receptiviti achieve 0.705–0.726 AUROC, compared with 0.564 for TF-IDF and 0.593 for text-only ModernBERT.
+
+2. **ModernBERT provides limited improvement.** It slightly improves text-only prediction but does not outperform logistic regression when author features are available (0.706 vs. 0.718–0.726 AUROC).
+
+3. **Adding post text does not improve the combined logistic regression baseline.** The validation-selected L1 model assigns zero weight to all TF-IDF features, retaining only 20 of the 211 author features. This suggests that the text provides limited additional information under the tested linear configuration.
+
+4. **Posting date has some predictive signal** (0.589 AUROC), while post length offers no useful improvement.
+
+5. **Small performance differences remain uncertain.** The test set contains 770 posts, and individual AUROC confidence intervals have an approximate half-width of 0.045.
+
+### Limitations
+
+- **Potential temporal leakage:** LIWC/Receptiviti features may incorporate writing produced after the target post, potentially inflating author-feature performance.
+- **Limited test size:** Small AUROC differences should not be overinterpreted.
+- **Limited tuning:** ModernBERT was evaluated with one main training configuration, apart from a comparison of new-layer learning rates.
+- **Feature scaling:** Differences in feature scales and regularization may affect the contribution of TF-IDF features to the combined logistic regression model.
+
+**Conclusion:** Author-level linguistic and psycholinguistic features are stronger predictors of delta-awarding behavior than current post text in our experiments. ModernBERT does not provide a clear advantage over simpler models when these features are available.
+
+For complete confidence intervals, preprocessing details, architecture, training configurations, and analysis, see the [detailed T5 report](docs/T5_report.md).
