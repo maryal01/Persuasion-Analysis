@@ -3,7 +3,7 @@
 Logistic regression on: the majority class, the posting date, the post length, the words of the post (TF-IDF), the author's
 LIWC and Receptiviti numbers, and words together with the author numbers. Penalty (L1/L2) and strength C are chosen on the
 validation split (AUROC); the test split is scored once per model. Test AUROC and PR-AUC get 95% intervals from a bootstrap
-over authors. The data is read from the Hub (scripts/t5/t5_data.py), the same data and splits as train.py (ModernBERT).
+over authors. The data is read from the Hub (scripts/t5/t5_common.py), the same data and splits as train.py (ModernBERT).
 
 Usage (from the repository root; needs numpy, scikit-learn and a Hugging Face login or HF_TOKEN):
     python scripts/t5/baselines.py --output-dir <out_dir>/t5_baselines
@@ -21,8 +21,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 
-from t5_data import HUB_REVISION, SPLIT_NAMES, T5Data, fit_scaler, load_t5_data
-from t5_evaluation import bootstrap_by_author, metrics
+from t5_common import HUB_REVISION, SPLIT_NAMES, T5Data, bootstrap_by_author, fit_scaler, load_t5_data, metrics
 
 Matrices = Tuple[Any, Any, Any]  # the design matrices of one model for (train, validation, test)
 C_GRID = (0.001, 0.01, 0.1, 1.0, 10.0)

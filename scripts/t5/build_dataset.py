@@ -25,7 +25,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from datasets import Dataset, DatasetDict
 from huggingface_hub import HfApi
 
-from t5_data import HUB_CONFIG, HUB_REPO, SPLIT_NAMES
+from t5_common import HUB_CONFIG, HUB_REPO, SPLIT_NAMES
 
 STAGING_REVISION = "t5"  # Hub branch that --push uploads to; copy the config to main afterwards (as for T2 and T3)
 SEED = 42  # same value and rule as split_of in create_dataset.py (T1/T2), applied to the OP here

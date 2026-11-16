@@ -7,7 +7,7 @@ Modes:
 
 Class-weighted cross entropy, AdamW, the validation AUROC is computed after every epoch and the best epoch is kept; the test
 split is scored once at the end (with a 95% bootstrap interval over authors). The data is read from the Hub
-(scripts/t5/t5_data.py), the same data and splits as baselines.py.
+(scripts/t5/t5_common.py), the same data and splits as baselines.py.
 
 Usage (from the repository root; GPU recommended; needs a Hugging Face login or HF_TOKEN):
     python scripts/t5/train.py --mode post_liwc --output-dir <out_dir>/t5_models --bf16
@@ -32,8 +32,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from transformers import AutoModel, AutoTokenizer
 
-from t5_data import HUB_REVISION, Split, T5Data, fit_scaler, load_t5_data
-from t5_evaluation import bootstrap_by_author, metrics
+from t5_common import HUB_REVISION, Split, T5Data, bootstrap_by_author, fit_scaler, load_t5_data, metrics
 
 MODEL_NAME = "answerdotai/ModernBERT-base"
 Batch = Dict[str, torch.Tensor]  # input_ids, attention_mask, features, labels
