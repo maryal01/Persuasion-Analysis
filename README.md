@@ -88,20 +88,24 @@ read -rs HF_TOKEN && export HF_TOKEN
 
 ## 4. T5: CMV malleability — `scripts/t5/`
 Predict whether the OP of a r/changemyview post awards a delta, from the post text and the OP's LIWC/Receptiviti features.
-Data: the `posts_malleability` and `author_liwc` files of Webis-CMV-20 ([Zenodo 3778298](https://zenodo.org/records/3778298)), referred to below as `<cmv_dir>`;
-`<out_dir>` is any folder outside the repository. Label = DeltaBot confirmed a delta under a comment of the OP; the post text is cleaned of the moderator footnote,
-`Edit:`/`Update:` paragraphs and delta symbols. Results and caveats are in `RESULTS.md`.
+The data (8,121 posts, split by OP) is the Hub config `cmv_malleability_liwc` on the branch `t5` of the dataset repo; `baselines.py` and
+`train.py` read it from there and record the commit they read, so everybody works on the same data. Label = DeltaBot confirmed a delta
+under a comment of the OP; the post text is cleaned of the moderator footnote, `Edit:`/`Update:` paragraphs and delta symbols when it is read.
+Results and caveats are in `RESULTS.md` and `docs/T5_report.md`. All commands need a Hugging Face login (or `HF_TOKEN`) with access to the dataset repo.
 
 ```bash
-# 1. dataset (8,121 posts, split by OP; stdlib only)
-python scripts/t5/build_dataset.py --posts <cmv_dir>/posts_malleability.jsonl.bz2 --liwc <cmv_dir>/author_liwc.jsonl.bz2 --output-dir <out_dir>/t5_dataset
+# 1. logistic-regression baselines (CPU, about 10 minutes)
+python scripts/t5/baselines.py --output-dir <out_dir>/t5_baselines
 
-# 2. logistic-regression baselines (CPU, ~10 min)
-python scripts/t5/baselines.py --data-dir <out_dir>/t5_dataset --output-dir <out_dir>/t5_baselines
+# 2. ModernBERT: post text only (--mode post) or post text + author features (--mode post_liwc); GPU; --smoke checks the pipeline on 16 posts
+python scripts/t5/train.py --mode post_liwc --output-dir <out_dir>/t5_models --bf16
+```
+`<out_dir>` is any folder outside the repository. `--hub-revision` selects another branch or a commit of the dataset repo.
 
-# 3. ModernBERT: post text only, or post text + author features (GPU; --smoke checks the pipeline on 16 posts)
-python scripts/t5/train.py --data-dir <out_dir>/t5_dataset --mode post_liwc --output-dir <out_dir>/t5_models --bf16
-
+To rebuild the dataset from the corpus (only needed if the data changes): download `posts_malleability.jsonl.bz2` and `author_liwc.jsonl.bz2` from
+[Webis-CMV-20](https://zenodo.org/records/3778298) into `<cmv_dir>` and run
+```bash
+python scripts/t5/build_dataset.py --posts <cmv_dir>/posts_malleability.jsonl.bz2 --liwc <cmv_dir>/author_liwc.jsonl.bz2 --push
 # optional: read threads to check what the label means
 python scripts/t5/inspect_labels.py collect --posts <cmv_dir>/posts_malleability.jsonl.bz2 --output <out_dir>/label_samples/candidates.jsonl
 ```
