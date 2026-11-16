@@ -64,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--users", default="ddo/users.json", help="users.json of the DDO corpus (default: %(default)s)")
     ap.add_argument("--dataset-repo", default="nlp-final-project11/persuasion-datasets")
     ap.add_argument("--dataset-config", default="ddo_switch", help="binary T2 config (default: %(default)s)")
-    ap.add_argument("--dataset-revision", default="t1-t2", help="branch of the dataset repo (default: %(default)s)")
+    ap.add_argument("--dataset-revision", default="main", help="branch of the dataset repo (default: %(default)s)")
     ap.add_argument("--bootstrap", type=int, default=1000, help="bootstrap resamples of the test debates")
     ap.add_argument("--output", help="write the results as JSON to this path")
     return ap.parse_args()

@@ -11,7 +11,7 @@ ModernBERT on the same test rows (AUROC 0.719).
 ## What it does
 
 `scripts/t1_t2/listener_baseline.py` fits class-weighted logistic regressions on the rows and splits
-of the Hub dataset `ddo_switch` (branch `t1-t2`). It reads only the id and label columns, so the
+of the Hub dataset `ddo_switch` (branch `main`). It reads only the id and label columns, so the
 transcripts are not downloaded. C is chosen on validation AUROC and the test split is scored once per
 model. Feature groups:
 
