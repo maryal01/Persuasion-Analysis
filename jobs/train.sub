@@ -38,18 +38,35 @@ shift || true
 #   DONE:   a full run finished, so later parts have nothing to do.
 #   FAILED: a part crashed, so later parts would fail the same way while holding a GPU.
 # A time-limit kill or scancel ends this script outright, so it sets neither.
-DONE=outputs/$CONFIG/DONE
-FAILED=outputs/$CONFIG/FAILED
+# A text + audience run (--audience <source>) has its own outputs and markers, named as in
+# scripts/train_delta.py: outputs/<config>-audience-<source>/. An --eval-only run scores a finished
+# model, so like a smoke run it neither checks nor sets the markers.
+#   sbatch -A <account> jobs/train.sub ddo_switch --audience self --bf16 --push
+#   sbatch -A <account> jobs/train.sub ddo_switch --eval-only --bf16
+RUN=$CONFIG
+previous=
+for arg in "$@"; do
+    if [[ $arg == --audience=* ]]; then
+        previous=--audience
+        arg=${arg#--audience=}
+    fi
+    if [[ $previous == --audience && $arg != none ]]; then
+        RUN=$CONFIG-audience-$arg
+    fi
+    previous=$arg
+done
+DONE=outputs/$RUN/DONE
+FAILED=outputs/$RUN/FAILED
 SMOKE=false
-if [[ " $* " == *" --smoke "* ]]; then
+if [[ " $* " == *" --smoke "* || " $* " == *" --eval-only"* ]]; then
     SMOKE=true
 fi
 if ! $SMOKE && [[ -f $DONE ]]; then
-    echo "$CONFIG already finished ($DONE exists); nothing to do."
+    echo "$RUN already finished ($DONE exists); nothing to do."
     exit 0
 fi
 if ! $SMOKE && [[ -f $FAILED ]]; then
-    echo "An earlier part of this $CONFIG run crashed ($FAILED exists); see its log, fix the cause, delete $FAILED, and resubmit."
+    echo "An earlier part of this $RUN run crashed ($FAILED exists); see its log, fix the cause, delete $FAILED, and resubmit."
     exit 1
 fi
 
