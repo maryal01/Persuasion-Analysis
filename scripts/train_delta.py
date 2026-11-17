@@ -42,7 +42,11 @@ def parse_args():
     ap.add_argument("--freeze", action="store_true", help="freeze the encoder, train only the classifier head (cheap, lower accuracy)")
     ap.add_argument("--audience", choices=AUDIENCE_SOURCES, default="none",
                     help="write the voter's profile in front of the debate (DDO configs only): self = the labels the "
-                         "voter reported, from ddo_users. Such a run is named <config>-audience-<source> (default: %(default)s)")
+                         "voter reported (ddo_users); inferred = the labels the T3 model predicted from their text "
+                         "(ddo_profiles_inferred); filled = reported where known, predicted otherwise. "
+                         "Such a run is named <config>-audience-<source> (default: %(default)s)")
+    ap.add_argument("--audience-revision", default="main",
+                    help="branch of the dataset repo that holds the profile tables (default: %(default)s)")
     ap.add_argument("--eval-only", nargs="?", const="", metavar="MODEL",
                     help="skip training and score the test split with a trained model: a path or a Hub repo; "
                          "without a value, the repo this run pushes to")
@@ -127,7 +131,7 @@ def main():
     if args.smoke:
         ds = DatasetDict({k: v.select(range(32)) for k, v in ds.items()})
     if args.audience != "none":
-        ds = add_profiles(ds, args.audience, args.shuffle_audience)
+        ds = add_profiles(ds, args.audience, args.shuffle_audience, revision=args.audience_revision)
     # a text + audience run keeps its own outputs and model repo; jobs/train.sub derives the same name
     run_name = args.dataset_config + ("" if args.audience == "none" else f"-audience-{args.audience}")
     model_repo = f"{MODEL_REPO}-{run_name}"
