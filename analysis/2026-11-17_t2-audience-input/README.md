@@ -1,7 +1,7 @@
 # T2 text + audience: the voter's profile in front of the debate
 
 **Status:** code written and checked on a laptop (2026-11-17). No text + audience model is trained yet:
-the runs need GPU jobs on Gilbreth. This first version uses self-reported profiles only.
+the runs need GPU jobs on Gilbreth. Profiles can be self-reported, inferred by the T3 model, or both.
 
 ## Goal
 
@@ -17,10 +17,17 @@ predictions saved per row, and a way to score a trained model again without trai
   dovish; religion: nonreligious; political ideology group: liberal`. An unknown label is written as
   `unknown`; a voter with no label at all gets `Voter profile: unknown`. Column and class names are read
   from the dataset. It sits in `scripts/common/` because T4 and the simulated audience need the same line.
-- **`--audience self`** in `scripts/train_delta.py` appends that line to the first text of each row, so
-  the model input is: resolution, the voter's side before the debate, the voter's profile, then the
-  debate. Such a run is named `<config>-audience-self`: its own `outputs/` folder and its own model repo,
-  so it never mixes with the text-only run. `jobs/train.sub` derives the same name for its markers.
+- **`--audience <source>`** in `scripts/train_delta.py` appends that line to the first text of each row,
+  so the model input is: resolution, the voter's side before the debate, the voter's profile, then the
+  debate. Such a run is named `<config>-audience-<source>`: its own `outputs/` folder and its own model
+  repo, so it never mixes with the text-only run. `jobs/train.sub` derives the same name for its markers.
+  The sources:
+  - `self`: the labels the voter reported (`ddo_users`).
+  - `inferred`: the labels the T3 model predicted from the voter's text (`ddo_profiles_inferred`, written
+    by `scripts/t3/infer_profiles.py`). A voter without text has no profile.
+  - `filled`: the reported label where there is one, the predicted label otherwise.
+- **`--audience-revision`** names the branch of the dataset repo that holds the profile tables (default
+  `main`). The inferred table is first pushed to branch `t3`.
 - **`--eval-only [MODEL]`** skips training and scores the test split with a trained model: a path or a
   Hub repo, by default the repo the run pushes to. It also works for the existing text-only models.
 - **`--shuffle-audience`** (with `--eval-only`) is the control from the proposal: every test voter gets
@@ -41,9 +48,16 @@ sbatch -A <account> jobs/train.sub ddo_switch --audience self --bf16 --push
 sbatch -A <account> jobs/train.sub ddo_switch --audience self --eval-only --shuffle-audience --bf16
 # save the test predictions of the existing text-only model
 sbatch -A <account> jobs/train.sub ddo_switch --eval-only --bf16
+
+# once ddo_profiles_inferred exists: blank profiles filled in by the T3 model
+sbatch -A <account> jobs/train.sub ddo_switch --audience filled --audience-revision t3 --bf16 --push
+# the model trained on reported profiles, scored with predicted ones instead
+sbatch -A <account> jobs/train.sub ddo_switch --audience inferred --audience-revision t3 \
+    --eval-only nlp-final-project11/nlp-project-modernbert-ddo_switch-audience-self --bf16
 ```
 
-The same commands work for `ddo_undecided`. Profiles are read from `ddo_users` on Hub branch `main`.
+The same commands work for `ddo_undecided`. Without `--audience-revision` the profile tables are read
+from Hub branch `main`.
 
 ## Results
 
@@ -70,7 +84,16 @@ No model results yet. Coverage of the self-reported profiles, from `scripts/comm
   voter's voting record without any text.
 - **The profile is coarse on purpose.** It uses the T3 labels, not the raw profile fields, so that a
   self-reported profile and one inferred by the T3 model have the same form and can be swapped.
-- **Inferred profiles are not included yet.** `--audience` accepts only `self` until the T3 model exists.
+- **Inferred profiles need their table first.** `inferred` and `filled` read `ddo_profiles_inferred`,
+  which exists once the T3 model is trained and `scripts/t3/infer_profiles.py` has run. About 94% of
+  `ddo_switch` rows have a voter with text, so `filled` should leave about 4% of rows without any
+  profile, against about 21% for `self` (measured on the issue labels during the dataset review).
+- **Predictions for users the T3 model was trained on are not a fair test of it.** The script prints the
+  share of rows that use such a label. For `filled` it is small by construction: a label is only
+  predicted where the voter reported none. For `inferred` it is most labelled voters, so compare `self`
+  and `inferred` on voters outside T3's training split.
+- **Adding the new sources did not change the `self` input.** The profile lines of all 47,145 users are
+  identical to the first version, so a run started before this change continues on the same input.
 - **Checked without a GPU,** on made-up rows: a run with `--audience self` trains and saves; `--eval-only`
   on the saved model reproduces its test logits exactly; with `--shuffle-audience` the logits change on
   exactly the rows whose profile line changed; a three-class config runs and prints per-class numbers.
