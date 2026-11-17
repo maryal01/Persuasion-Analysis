@@ -34,6 +34,11 @@ rather than pairwise: word count 51.9%, Tan et al.'s best text features 57.8%, t
 debater traits 61.1%. Their metric differs from ours, so don't compare the numbers directly.
 Tan et al. (2016)'s 65.1% is on a different corpus.
 
+**Link sensitivity** (same model, no retraining): replacing or deleting the URLs in the 399 test
+replies that contain one lowers a reply's score (−0.12 / −0.16) but barely moves overall pairwise
+accuracy (−0.7 [−1.8, +0.5] / −1.1 [−2.3, +0.2] points); URL and length effects aren't separated.
+Details: `analysis/2026-11-09_cmv-link-bias/README.md`.
+
 ## T2: DDO voter switching (`ddo_switch`, `ddo_undecided`)
 
 Not trained yet.
