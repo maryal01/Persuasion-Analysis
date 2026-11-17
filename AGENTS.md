@@ -14,7 +14,7 @@ Research questions: (1) can we predict whether a listener changes their mind, gi
 | T2 DDO persuasion | decided voter: did they switch; tied voter: Pro/Con/Tie after | datasets built, not trained |
 | T3 Audience profiling | predict a person's stance on broad dimensions from their activity | not started |
 | T4 DDO vote prediction | reproduce Durmus & Cardie's "more convincing" vote prediction | not started |
-| T5 CMV malleability | from the OP's post and history, predict whether they award any delta | dataset configs built (`cmv_malleability`, `cmv_history`: each OP's CMV posts and comments from `threads.jsonl`), not trained; 21% of posts have more history than 8,192 tokens |
+| T5 CMV malleability | from the OP's post and history, predict whether they award any delta | **post + author features done**: logistic regression and ModernBERT on 8,121 posts with the author's LIWC/Receptiviti numbers (Hub config `cmv_malleability_liwc`, branch `main`; test AUROC 0.59 from the text, 0.71 with the author numbers, see `RESULTS.md`, `docs/T5_report.md`). **History text not trained yet**: `create_dataset.py --sources cmv_history` builds `cmv_malleability` and `cmv_history` (each OP's CMV posts and comments from `threads.jsonl`), they are not on the Hub at the moment; 21% of posts have more history than 8,192 tokens |
 
 Training runs on Purdue RCAC Gilbreth (`train.sub`). Hugging Face org `nlp-final-project11` holds the datasets (`persuasion-datasets`, branch `t1-t2`) and private models (`nlp-project-modernbert-<config>`).
 
