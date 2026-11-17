@@ -315,19 +315,11 @@ def main() -> None:
         print(f"[VRAM] peak allocated {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB, "
               f"reserved {torch.cuda.max_memory_reserved() / 2**30:.1f} GiB")
 
-    logits = {}
-    for split in ("validation", "test"):
-        logits[split] = np.asarray(trainer.predict(ds[split]).predictions)
-        save_predictions(f"{outputdir}/predictions_{split}.parquet", split_users[split], logits[split],
-                         split_labels[split], blocks)
+    logits = {split: np.asarray(trainer.predict(ds[split]).predictions) for split in ("validation", "test")}
     results = test_table(logits["test"], split_labels["test"], split_labels["train"], class_names, blocks, args.bootstrap)
-    with open(f"{outputdir}/test_metrics.json", "w") as fh:
-        json.dump({"dataset": {"repo": args.dataset_repo, "revision": args.dataset_revision},
-                   "options": {"model": args.model_name, "max_length": max_length, "seed": args.seed,
-                               "class_weights": not args.no_class_weights, "bf16": use_bf16, "smoke": args.smoke},
-                   "users": {split: len(ds[split]) for split in SPLITS}, "labels": results}, fh, indent=2)
-    print(f"\nWrote {outputdir}/test_metrics.json and predictions_validation/test.parquet")
 
+    # The model first. A push uploads everything in the output folder except checkpoints, so the files
+    # written below (one row per user, with user names) stay on this machine and are not uploaded.
     if args.push and not args.smoke:
         trainer.push_to_hub()
         print(f"\nPushed model -> https://huggingface.co/{MODEL_REPO} (private)")
@@ -335,6 +327,16 @@ def main() -> None:
         trainer.save_model(outputdir)
         tok.save_pretrained(outputdir)
         print(f"\nSaved model locally -> {outputdir}/  (add --push to upload)")
+
+    for split in ("validation", "test"):
+        save_predictions(f"{outputdir}/predictions_{split}.parquet", split_users[split], logits[split],
+                         split_labels[split], blocks)
+    with open(f"{outputdir}/test_metrics.json", "w") as fh:
+        json.dump({"dataset": {"repo": args.dataset_repo, "revision": args.dataset_revision},
+                   "options": {"model": args.model_name, "max_length": max_length, "seed": args.seed,
+                               "class_weights": not args.no_class_weights, "bf16": use_bf16, "smoke": args.smoke},
+                   "users": {split: len(ds[split]) for split in SPLITS}, "labels": results}, fh, indent=2)
+    print(f"\nWrote {outputdir}/test_metrics.json and predictions_validation/test.parquet")
 
 
 if __name__ == "__main__":

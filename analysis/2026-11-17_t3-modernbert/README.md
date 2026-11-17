@@ -29,7 +29,8 @@ social issues, personal liberties, foreign policy, religion, political ideology 
   validation macro-F1 averaged over the six label columns; validation runs twice per epoch.
 - **Outputs** in `outputs/t3_profiles/`: `predictions_validation.parquet` and `predictions_test.parquet`
   (per user and label column: true class, predicted class, class probabilities), `test_metrics.json`,
-  and the printed test table with 95% intervals from a bootstrap over users.
+  and the printed test table with 95% intervals from a bootstrap over users. The prediction files
+  hold user names; they are written after the model is pushed, so they are not uploaded with it.
 
 ## Run
 
