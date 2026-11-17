@@ -16,6 +16,11 @@ SEED = 42
 
 BEFORE = "Agreed with before the debate"
 AFTER = "Agreed with after the debate"
+# The corpus dates votes relative to its crawl. Votes dated "10 years ago" were cast before about
+# September 2008, and 98.9% of them share one pattern: tied before and after, one debater marked on
+# "Made more convincing arguments", everything else tied. Later votes rarely look like that (2.3% of
+# those dated "9 years ago"), so the voting form of that period most likely did not ask for a stance.
+OLD_FORM_VOTE_TIME = "10 years ago"
 OTHER_CRITERIA = (
     "Who had better conduct",
     "Had better spelling and grammar",
@@ -100,8 +105,13 @@ def build_ddo_votes(path):
     Side-to-tie votes are dropped, matching the proposal's ~66k decided votes. So are votes by the
     debaters themselves, repeat votes, and votes without before/after stances. `filled_other_criteria`
     flags voters who marked a debater on another criterion, since a pre-debate tie can mean "skipped".
+
+    ddo_undecided also drops tied-before votes cast under the old voting form (see OLD_FORM_VOTE_TIME):
+    their tie is a blank, not an answer. ddo_switch keeps its few votes from that period, because a
+    voter who marked a side before and after was asked the question.
     """
     switch, undecided = [], []
+    old_form_ties = 0
     with open(path, "rb") as fh:
         for debate_id, d in ijson.kvitems(fh, ""):
             positions = {d.get("participant_1_name"): d.get("participant_1_position"),
@@ -124,6 +134,9 @@ def build_ddo_votes(path):
                     transcript = debate_transcript(d)
                 if not transcript:
                     break
+                if before == "Tie" and (v.get("time") or "").strip() == OLD_FORM_VOTE_TIME:
+                    old_form_ties += 1
+                    continue
                 row = {
                     "original": f"Resolution: {title}\nVoter's side before the debate: {before}",
                     "reply": transcript,
@@ -136,6 +149,7 @@ def build_ddo_votes(path):
                     undecided.append({**row, "label": {"Tie": 0, "Pro": 1, "Con": 2}[after]})
                 else:
                     switch.append({**row, "label": int(after != before)})
+    print(f"[ddo_undecided] left out {old_form_ties} tied-before votes cast under the old voting form")
     return {"ddo_switch": to_splits(switch, ["stayed", "switched"]),
             "ddo_undecided": to_splits(undecided, ["tie", "pro", "con"])}
 
