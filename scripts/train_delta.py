@@ -1,5 +1,6 @@
 import argparse
 import glob
+import json
 import os
 from collections import defaultdict
 
@@ -15,6 +16,8 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
+
+from common.audience import AUDIENCE_SOURCES, add_profiles
 
 DATASET_REPO = "nlp-final-project11/persuasion-datasets"
 DATASET_REVISION = "t1-t2"  # Hub branch holding the T1/T2 configs built by scripts/create_dataset.py
@@ -37,7 +40,18 @@ def parse_args():
     ap.add_argument("--smoke", action="store_true", help="tiny/fast pipeline check")
     ap.add_argument("--bf16", action="store_true", help="train with bf16 mixed precision (default: fp32, as the T1 baseline)")
     ap.add_argument("--freeze", action="store_true", help="freeze the encoder, train only the classifier head (cheap, lower accuracy)")
-    return ap.parse_args()
+    ap.add_argument("--audience", choices=AUDIENCE_SOURCES, default="none",
+                    help="write the voter's profile in front of the debate (DDO configs only): self = the labels the "
+                         "voter reported, from ddo_users. Such a run is named <config>-audience-<source> (default: %(default)s)")
+    ap.add_argument("--eval-only", nargs="?", const="", metavar="MODEL",
+                    help="skip training and score the test split with a trained model: a path or a Hub repo; "
+                         "without a value, the repo this run pushes to")
+    ap.add_argument("--shuffle-audience", action="store_true",
+                    help="control, with --eval-only: every test voter gets another voter's profile")
+    args = ap.parse_args()
+    if args.shuffle_audience and (args.eval_only is None or args.audience == "none"):
+        ap.error("--shuffle-audience needs --eval-only and --audience")
+    return args
 
 def binary_auroc(scores, labels):
     """Chance a random positive outscores a random negative (ties count half); nan if a class is absent."""
@@ -48,19 +62,24 @@ def binary_auroc(scores, labels):
     ranks = (np.cumsum(counts) - (counts - 1) / 2)[inverse]  # 1-based ranks, averaged over ties
     return float((ranks[labels == 1].sum() - pos * (pos + 1) / 2) / (pos * neg))
 
-def compute_metrics(eval_pred):
-    logits, labels = eval_pred
-    logits, labels = np.asarray(logits), np.asarray(labels)
-    preds = logits.argmax(-1)
+def per_class_scores(preds, labels, n_classes):
+    """(precision, recall, F1) of every class; 0 where a class is never predicted or never present."""
     per_class = []
-    for c in range(logits.shape[1]):
+    for c in range(n_classes):
         tp = int(((preds == c) & (labels == c)).sum())
         fp = int(((preds == c) & (labels != c)).sum())
         fn = int(((preds != c) & (labels == c)).sum())
         prec = tp / (tp + fp) if (tp + fp) else 0.0
         rec = tp / (tp + fn) if (tp + fn) else 0.0
         per_class.append((prec, rec, 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0))
-    metrics = {"accuracy": float((preds == labels).mean()), "macro_f1": float(np.mean([f for _, _, f in per_class]))}
+    return per_class
+
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    logits, labels = np.asarray(logits), np.asarray(labels)
+    preds = logits.argmax(-1)
+    per_class = per_class_scores(preds, labels, logits.shape[1])
+    metrics ={"accuracy": float((preds == labels).mean()), "macro_f1": float(np.mean([f for _, _, f in per_class]))}
     if logits.shape[1] == 2:  # report the positive class (delta, switched)
         prec, rec, f1 = per_class[1]
         metrics.update(precision=prec, recall=rec, f1=f1, auroc=binary_auroc(logits[:, 1] - logits[:, 0], labels))
@@ -107,6 +126,12 @@ def main():
     ds = load_dataset(DATASET_REPO, args.dataset_config, revision=args.dataset_revision, token=HF_TOKEN).rename_column("label", "labels")
     if args.smoke:
         ds = DatasetDict({k: v.select(range(32)) for k, v in ds.items()})
+    if args.audience != "none":
+        ds = add_profiles(ds, args.audience, args.shuffle_audience)
+    # a text + audience run keeps its own outputs and model repo; jobs/train.sub derives the same name
+    run_name = args.dataset_config + ("" if args.audience == "none" else f"-audience-{args.audience}")
+    model_repo = f"{MODEL_REPO}-{run_name}"
+    evaluate_only = args.eval_only is not None
 
     label_names = ds["train"].features["labels"].names
     counts = np.bincount(list(ds["train"]["labels"]), minlength=len(label_names))
@@ -121,12 +146,20 @@ def main():
 
     ds = ds.map(tokenize, batched=True, remove_columns=["original", "reply"])
 
-    model = AutoModelForSequenceClassification.from_pretrained(
-        MODEL_NAME, num_labels=len(label_names),
-        id2label=dict(enumerate(label_names)),
-        label2id={n: i for i, n in enumerate(label_names)},
-        token=HF_TOKEN,
-    )
+    if evaluate_only:
+        source = args.eval_only or model_repo
+        model = AutoModelForSequenceClassification.from_pretrained(source, token=HF_TOKEN)
+        model_labels = [model.config.id2label[i] for i in range(model.config.num_labels)]
+        if model_labels != label_names:
+            raise SystemExit(f"{source} predicts {model_labels}, but {args.dataset_config} has the classes {label_names}")
+        print(f"[EVAL ONLY] scoring the test split with {source}; nothing is trained or pushed")
+    else:
+        model = AutoModelForSequenceClassification.from_pretrained(
+            MODEL_NAME, num_labels=len(label_names),
+            id2label=dict(enumerate(label_names)),
+            label2id={n: i for i, n in enumerate(label_names)},
+            token=HF_TOKEN,
+        )
 
     if args.freeze:
         for p in model.base_model.parameters():
@@ -139,8 +172,7 @@ def main():
         print("[PRECISION] --bf16 requested but this GPU does not support it; using fp32")
     print(f"[PRECISION] {'bf16 mixed precision' if use_bf16 else 'fp32'}")
     # smoke runs get their own dir so a real run never resumes from a smoke checkpoint
-    outputdir = f"outputs/{args.dataset_config}" + ("-smoke" if args.smoke else "")
-    model_repo = f"{MODEL_REPO}-{args.dataset_config}"
+    outputdir = f"outputs/{run_name}" + ("-smoke" if args.smoke else "")
     targs = TrainingArguments(
         output_dir=outputdir,
         per_device_train_batch_size=batch_size,
@@ -161,7 +193,7 @@ def main():
         # so on balanced cmv it preferred checkpoints that call most replies "delta"
         metric_for_best_model="auroc" if len(label_names) == 2 else "macro_f1",
         report_to="none",
-        push_to_hub=args.push and not args.smoke,
+        push_to_hub=args.push and not args.smoke and not evaluate_only,
         hub_model_id=model_repo,
         hub_private_repo=True,  # only applies when the repo is created; change visibility on the Hub
         # no hub_token: it would be pickled into every checkpoint's training_args.bin and pushed
@@ -175,13 +207,14 @@ def main():
         compute_loss_func=weighted_cross_entropy(class_weights),
     )
 
-    # Continue a run cut off by a time limit; delete outputs/<config> to start over.
-    resume = None if args.smoke else last_complete_checkpoint(outputdir)
-    if resume:
-        print(f"[RESUME] continuing from {resume}")
-    trainer.train(resume_from_checkpoint=resume)
-    if torch.cuda.is_available():  # peak over this process, to size future runs
-        print(f"[VRAM] peak allocated {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB, reserved {torch.cuda.max_memory_reserved() / 2**30:.1f} GiB")
+    if not evaluate_only:
+        # Continue a run cut off by a time limit; delete outputs/<run> to start over.
+        resume = None if args.smoke else last_complete_checkpoint(outputdir)
+        if resume:
+            print(f"[RESUME] continuing from {resume}")
+        trainer.train(resume_from_checkpoint=resume)
+        if torch.cuda.is_available():  # peak over this process, to size future runs
+            print(f"[VRAM] peak allocated {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB, reserved {torch.cuda.max_memory_reserved() / 2**30:.1f} GiB")
 
     pred = trainer.predict(ds["test"])
     metrics = {k[5:]: v for k, v in pred.metrics.items() if k.startswith("test_")}
@@ -191,14 +224,36 @@ def main():
     print("\n=== TEST METRICS ===")
     for name, v in metrics.items():
         print(f"  {name:10s}: {v:.4f}" if isinstance(v, float) else f"  {name}: {v}")
+    predicted = pred.predictions.argmax(-1)
+    per_class = {}
+    print("  per class (precision, recall, F1, test rows):")
+    for name, (prec, rec, f1) in zip(label_names, per_class_scores(predicted, pred.label_ids, len(label_names))):
+        per_class[name] = {"precision": prec, "recall": rec, "f1": f1, "rows": int((pred.label_ids == label_names.index(name)).sum())}
+        print(f"    {name:10s}: {prec:.4f}  {rec:.4f}  {f1:.4f}  {per_class[name]['rows']}")
 
-    if args.push and not args.smoke:
+    # The model first: if writing the files below fails, a finished model is not lost.
+    if evaluate_only or args.smoke:
+        pass  # nothing to keep
+    elif args.push:
         trainer.push_to_hub()
         print(f"\nPushed model -> https://huggingface.co/{model_repo} (private)")
-    elif not args.smoke:
+    else:
         trainer.save_model(outputdir)
         tok.save_pretrained(outputdir)
         print(f"\nSaved model locally -> {outputdir}/  (add --push to upload)")
+
+    # Test scores per row, for paired comparisons between models: every column that is not model input
+    # (ids, voter, label) plus the logits. The shuffled-profile control gets its own files.
+    suffix = "_shuffled" if args.shuffle_audience else ""
+    os.makedirs(outputdir, exist_ok=True)
+    kept = [c for c in ds["test"].column_names if c not in tok.model_input_names]
+    ds["test"].select_columns(kept).add_column("logits", pred.predictions.tolist()).to_parquet(f"{outputdir}/predictions_test{suffix}.parquet")
+    with open(f"{outputdir}/test_metrics{suffix}.json", "w") as fh:
+        json.dump({"run": run_name, "dataset": {"config": args.dataset_config, "revision": getattr(args, "dataset_revision", None)},
+                   "audience": args.audience, "shuffled_audience": args.shuffle_audience,
+                   "model": (args.eval_only or model_repo) if evaluate_only else MODEL_NAME, "max_length": max_length,
+                   "metrics": metrics, "per_class": per_class}, fh, indent=2)
+    print(f"\nWrote {outputdir}/predictions_test{suffix}.parquet and test_metrics{suffix}.json")
 
 if __name__ == "__main__":
     main()
