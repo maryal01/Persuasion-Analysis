@@ -91,9 +91,9 @@ def load_users(repo: str, config: str, revision: str) -> Tuple[Dict[str, List[st
     return users, labels, class_names
 
 
-def load_texts(repo: str, config: str, revision: str, wanted: Set[str], all_debates: bool, titles: bool,
-               max_rows: Optional[int]) -> Tuple[Dict[str, str], Counter]:
-    """One document per wanted user: their text items joined by blank lines. Streams the history table."""
+def load_items(repo: str, config: str, revision: str, wanted: Set[str], all_debates: bool, titles: bool,
+               max_rows: Optional[int]) -> Tuple[Dict[str, List[str]], Counter]:
+    """The text items of every wanted user, in table order. Streams the history table."""
     ds = load_dataset(repo, config, revision=revision, columns=HISTORY_COLUMNS, streaming=True,
                       token=os.environ.get("HF_TOKEN"))
     items = defaultdict(list)
@@ -114,6 +114,13 @@ def load_texts(repo: str, config: str, revision: str, wanted: Set[str], all_deba
             rows_read += len(batch["user"])
             if max_rows is not None and rows_read >= max_rows:
                 break
+    return dict(items), counts
+
+
+def load_texts(repo: str, config: str, revision: str, wanted: Set[str], all_debates: bool, titles: bool,
+               max_rows: Optional[int]) -> Tuple[Dict[str, str], Counter]:
+    """One document per wanted user: their text items joined by blank lines."""
+    items, counts = load_items(repo, config, revision, wanted, all_debates, titles, max_rows)
     return {user: "\n\n".join(parts) for user, parts in items.items()}, counts
 
 
