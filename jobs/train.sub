@@ -37,8 +37,12 @@ shift || true
 # Which script trains this name. t3_profiles is the T3 stance model (scripts/t3/train.py, which writes
 # to outputs/t3_profiles/); every other name is a dataset config of scripts/train_delta.py.
 #   sbatch -A <account> jobs/train.sub t3_profiles --bf16 --push
+# t3_profiles_infer runs that model over every user with text (scripts/t3/infer_profiles.py):
+#   sbatch -A <account> jobs/train.sub t3_profiles_infer --bf16 --push
 if [[ $CONFIG == t3_profiles ]]; then
     TRAIN=(scripts/t3/train.py)
+elif [[ $CONFIG == t3_profiles_infer ]]; then
+    TRAIN=(scripts/t3/infer_profiles.py)
 else
     TRAIN=(scripts/train_delta.py --dataset-config "$CONFIG")
 fi
