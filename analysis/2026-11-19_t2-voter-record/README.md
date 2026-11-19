@@ -1,7 +1,8 @@
 # T2: the voter's voting record in the model input
 
-**Status:** code written and checked on a laptop (2026-11-19). No model with the voting record in its
-input is trained yet: the runs need GPU jobs on Gilbreth.
+**Status:** three models trained on Gilbreth on 2026-11-19 (`ddo_switch`, one seed each). One model
+that reads the debate and the voter's voting record scores AUROC 0.838, the same as the text-only model
+and the record combined after training (0.836). Adding the profile as well changes nothing (0.831).
 
 ## Goal
 
@@ -52,7 +53,47 @@ chained standby jobs); the added line is short. Not measured.
 
 ## Results
 
-No model is trained yet. Measured without a model, on the real `ddo_switch` rows:
+`ddo_switch`, 5,845 test votes (368 switched), seed 42, the settings of the text-only run (3 epochs, at
+most 4,096 tokens, `--bf16`). Intervals are 95%, from a bootstrap over debates; the table comes from
+`scripts/t1_t2/compare_models.py` with the three new models as `--test-scores` rows.
+
+| Row | Test AUROC | 95% interval | Same-debate pairs |
+|---|---|---|---|
+| Text only | 0.719 | 0.687–0.749 | 50.8% |
+| Text + audience (the proposal's model) | 0.737 | 0.709–0.764 | 58.1% |
+| Listener: voting record, no text | 0.790 | 0.765–0.813 | 78.3% |
+| Listener: profile + voting record + side × year, no text | 0.805 | 0.780–0.829 | 78.2% |
+| Text only + voting record, combined after training | 0.836 | 0.812–0.858 | 78.4% |
+| **One model: text + voting record** (`--voter-record all`) | **0.838** | 0.816–0.860 | 77.5% |
+| One model: text + audience + voting record (`--audience self --voter-record all`) | 0.831 | 0.806–0.854 | 77.2% |
+| Text only + voting record of earlier years, combined after training | 0.775 | 0.746–0.802 | 63.7% |
+| One model: text + voting record of earlier years (`--voter-record earlier`) | 0.767 | 0.739–0.793 | 63.9% |
+
+| Comparison (first minus second) | AUROC difference | 95% interval | p |
+|---|---|---|---|
+| One model: text + record − Text only | +0.120 | +0.095 to +0.147 | 0.0005 |
+| One model: text + record − Listener: voting record | +0.048 | +0.029 to +0.070 | 0.0005 |
+| One model: text + record − Listener: profile + voting record + side × year | +0.034 | +0.016 to +0.054 | 0.0020 |
+| One model: text + record − Text only + voting record, combined after training | +0.002 | −0.009 to +0.016 | 0.70 |
+| One model: text + audience + record − One model: text + record | −0.007 | −0.019 to +0.003 | 0.20 |
+| One model: text + record, earlier years − Listener: voting record, earlier years only | +0.093 | +0.069 to +0.116 | 0.0005 |
+| One model: text + record, earlier years − the same two combined after training | −0.008 | −0.020 to +0.005 | 0.24 |
+
+- **One model with the record in its input scores 0.838.** That is 0.120 above the text-only model and
+  0.048 above the record alone, both clear, and 0.034 above the best model without text.
+- **Reading both together gives no more than combining them afterwards** (0.838 against 0.836; the
+  interval of the difference includes 0). The debate and the record seem to add up; this run shows no
+  sign that the model uses them jointly.
+- **The profile adds nothing on top of the record** (0.831 with it, 0.838 without; not a clear
+  difference). The listener baseline and the combinations showed the same.
+- **Counting only earlier years, one model scores 0.767,** against 0.674 for that record alone.
+- **One seed.** The three-seed runs of the other two models moved by up to 0.02 between seeds
+  (`analysis/2026-11-19_t2-compare-models/`), so differences of that size between rows here mean
+  little.
+- Models: `nlp-final-project11/nlp-project-modernbert-ddo_switch-record-all`, `-record-earlier` and
+  `-ddo_switch-audience-self-record-all` (private). The Slurm job ids and durations are not copied here.
+
+Measured without a model, on the real `ddo_switch` rows:
 
 | Kind | Rows whose voter has a record (train / validation / test) | Different lines in training | AUROC of the line alone (train / validation / test) |
 |---|---|---|---|
@@ -88,6 +129,6 @@ training rows.
   `--voter-record` trains and saves; `--eval-only` reproduces its test scores; with
   `--shuffle-audience` the scores change on exactly the rows whose line changed; `jobs/train.sub` and
   the script derive the same run name in 10 argument forms.
-- **Not checked:** a real run on a GPU.
+- **Not run:** the swapped-record control for the trained models, and seeds other than 42.
 - **`ddo_undecided`** works the same way (the line then lists `tie`, `pro` and `con`); nothing is
   measured for it here.
