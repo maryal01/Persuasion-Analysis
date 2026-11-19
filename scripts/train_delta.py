@@ -19,6 +19,7 @@ from transformers import (
 )
 
 from common.audience import AUDIENCE_SOURCES, add_profiles
+from common.voter_record import RECORD_KINDS, add_records
 
 DATASET_REPO = "nlp-final-project11/persuasion-datasets"
 DATASET_REVISION = "t1-t2"  # Hub branch holding the T1/T2 configs built by scripts/create_dataset.py
@@ -56,11 +57,16 @@ def parse_args():
     ap.add_argument("--eval-only", nargs="?", const="", metavar="MODEL",
                     help="skip training and score the test split with a trained model: a path or a Hub repo; "
                          "without a value, the repo this run pushes to")
+    ap.add_argument("--voter-record", choices=RECORD_KINDS, default="none",
+                    help="write the voter's voting record in front of the debate (DDO configs only): how often their "
+                         "votes in training debates ended in each class; all = every training debate except the "
+                         "row's own, earlier = only debates from earlier years. Not in the project proposal: an "
+                         "extension. Such a run has -record-<kind> in its name (default: %(default)s)")
     ap.add_argument("--shuffle-audience", action="store_true",
-                    help="control, with --eval-only: every test voter gets another voter's profile")
+                    help="control, with --eval-only: every test voter gets another voter's profile and voting record")
     args = ap.parse_args()
-    if args.shuffle_audience and (args.eval_only is None or args.audience == "none"):
-        ap.error("--shuffle-audience needs --eval-only and --audience")
+    if args.shuffle_audience and (args.eval_only is None or (args.audience == "none" and args.voter_record == "none")):
+        ap.error("--shuffle-audience needs --eval-only and --audience or --voter-record")
     return args
 
 def binary_auroc(scores, labels):
@@ -138,9 +144,12 @@ def main():
         ds = DatasetDict({k: v.select(range(32)) for k, v in ds.items()})
     if args.audience != "none":
         ds = add_profiles(ds, args.audience, args.shuffle_audience, revision=args.audience_revision)
-    # a text + audience run and a run with another seed keep their own outputs and model repo;
+    if args.voter_record != "none":  # after the profile, so the input is: resolution, side before, profile, record, debate
+        ds = add_records(ds, args.voter_record, shuffle=args.shuffle_audience)
+    # a run with a profile, a voting record or another seed keeps its own outputs and model repo;
     # jobs/train.sub derives the same name
     run_name = (args.dataset_config + ("" if args.audience == "none" else f"-audience-{args.audience}")
+                + ("" if args.voter_record == "none" else f"-record-{args.voter_record}")
                 + ("" if args.seed == DEFAULT_SEED else f"-seed{args.seed}"))
     model_repo = f"{MODEL_REPO}-{run_name}"
     evaluate_only = args.eval_only is not None
@@ -269,7 +278,8 @@ def main():
         ds[split].select_columns(kept).add_column("logits", logits.tolist()).to_parquet(f"{outputdir}/predictions_{split}{suffix}.parquet")
     with open(f"{outputdir}/test_metrics{suffix}.json", "w") as fh:
         json.dump({"run": run_name, "dataset": {"config": args.dataset_config, "revision": getattr(args, "dataset_revision", None)},
-                   "audience": args.audience, "shuffled_audience": args.shuffle_audience, "seed": args.seed,
+                   "audience": args.audience, "voter_record": args.voter_record,
+                   "shuffled_audience": args.shuffle_audience, "seed": args.seed,
                    "model": (args.eval_only or model_repo) if evaluate_only else MODEL_NAME, "max_length": max_length,
                    "metrics": metrics, "per_class": per_class}, fh, indent=2)
     print(f"\nWrote {outputdir}/predictions_test{suffix}.parquet, predictions_validation{suffix}.parquet and test_metrics{suffix}.json")
