@@ -34,7 +34,9 @@ Usage (from the repository root; needs scikit-learn):
 import argparse
 import json
 import os
+import sys
 from collections import Counter, defaultdict
+from pathlib import Path
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import ijson
@@ -44,6 +46,9 @@ from scipy.sparse import csr_matrix, hstack
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.voter_record import record_counts  # noqa: E402
 
 SPLITS = ("train", "validation", "test")
 COLUMNS = ["debate_id", "voter", "before", "year", "label"]
@@ -134,28 +139,13 @@ def record_features(splits: Dict[str, Rows], n_classes: int, earlier_years_only:
 
     A training row never counts itself: with `earlier_years_only` only debates from earlier years count,
     otherwise the row is left out of its own voter's totals. Validation and test debates are never counted.
+    The counting is scripts/common/voter_record.py's, which also writes the record as text for the models.
     """
     train = splits["train"]
-    by_voter = defaultdict(list)  # voter -> [(year, label)]
-    for voter, year, label in zip(train["voter"], train["year"], train["label"]):
-        by_voter[voter].append((year, label))
-
-    def counts(voter: str, year: Optional[int], own_label: Optional[int]) -> List[int]:
-        votes = by_voter.get(voter, [])
-        if earlier_years_only:
-            votes = [] if year is None else [(y, l) for y, l in votes if y is not None and y < year]
-            own_label = None
-        per_class = [0] * n_classes
-        for _, label in votes:
-            per_class[label] += 1
-        if own_label is not None:  # leave the training row itself out
-            per_class[own_label] -= 1
-        return per_class
-
     raw = {}
     for s, rows in splits.items():
-        own = rows["label"] if s == "train" else [None] * len(rows["label"])
-        per_class = np.array([counts(v, y, l) for v, y, l in zip(rows["voter"], rows["year"], own)])
+        per_class = record_counts(train["voter"], train["year"], train["label"], rows["voter"], rows["year"],
+                                  n_classes, earlier_years_only, own_labels=rows["label"] if s == "train" else None)
         raw[s] = np.column_stack([np.log1p(per_class), per_class.sum(axis=1) == 0])
     mean, std = raw["train"].mean(axis=0), raw["train"].std(axis=0)
     std[std == 0] = 1.0
