@@ -1,9 +1,9 @@
 # T2: paired comparisons, and the text model combined with the listener baseline
 
-**Status:** run on 2026-11-19 on the scores of the two trained `ddo_switch` models (one seed each).
-The text-only model combined with the voter's voting record scores AUROC 0.836, above the record alone
-(0.790) and the text alone (0.719). The gain from the voter's profile (0.719 to 0.737) is not
-significant with one seed.
+**Status:** run on 2026-11-19 on the scores of the trained `ddo_switch` models, first for seed 42 and
+then for three seeds (42, 43, 44). The text-only model combined with the voter's voting record scores
+AUROC 0.833 on average (0.836 for seed 42), above the record alone (0.790) and the text alone (0.708).
+The voter's profile adds 0.036 on average (0.708 to 0.744); the gain is clear in two of the three seeds.
 
 ## Goal
 
@@ -75,7 +75,7 @@ sbatch -A <account> jobs/train.sub ddo_switch --audience self --seed 43 --bf16 -
 
 Each run saves its validation and test scores, so the comparison can be run per seed, for example with
 `--model "Text only=outputs/ddo_switch-seed43" --model "Text + audience=outputs/ddo_switch-audience-self-seed43"`.
-No run with another seed exists yet.
+Seeds 43 and 44 were run for both models on 2026-11-19; see "Three seeds" under Results.
 
 ## Results
 
@@ -124,7 +124,8 @@ possible p-value is 0.0005):
   0.046 above the record alone and 0.117 above the text alone. Both differences are clear. The record
   gets about twice the weight of the text score (1.33 against 0.73 on standardised scores).
 - **The gain from the voter's profile is not shown.** Text + audience is 0.019 above text only, with an
-  interval that includes 0 (p = 0.14). This is one seed per model.
+  interval that includes 0 (p = 0.14). This is one seed per model; with three seeds the gain is clear
+  (see "Three seeds" below).
 - **The model does read the profile.** With swapped profiles it loses 0.055, and with the T3 model's
   predicted profiles 0.031; both differences are clear.
 - **With the record, the profile no longer helps.** Combined with the voting record, the text-only
@@ -136,6 +137,49 @@ possible p-value is 0.0005):
   the same side get the same input, and their scores differ by at most 0.05 (the scores have a standard
   deviation of 1.5), so their order is close to random. The text + audience model separates them with
   the profile (58.1%).
+
+### Three seeds
+
+Both trained models were run again with seeds 43 and 44 (`--seed`, same settings; model repos
+`nlp-project-modernbert-ddo_switch-seed43`, `-seed44`, `-ddo_switch-audience-self-seed43`, `-seed44`).
+The script was run once per seed. Test AUROC; the last column is the mean and the standard deviation
+over the three seeds. The listener rows do not depend on the seed.
+
+| Row | Seed 42 | Seed 43 | Seed 44 | Mean ± std |
+|---|---|---|---|---|
+| Text only | 0.719 | 0.697 | 0.709 | 0.708 ± 0.011 |
+| Text + audience (the proposal's model) | 0.737 | 0.746 | 0.749 | 0.744 ± 0.006 |
+| Listener: voting record | 0.790 | 0.790 | 0.790 | 0.790 |
+| Listener: profile + voting record + side × year | 0.805 | 0.805 | 0.805 | 0.805 |
+| Text only + voting record | 0.836 | 0.829 | 0.834 | 0.833 ± 0.004 |
+| Text only + voting record, earlier years only | 0.775 | 0.763 | 0.770 | 0.769 ± 0.006 |
+| Text only + all listener features | 0.831 | 0.824 | 0.831 | 0.829 ± 0.004 |
+| Text + audience + voting record | 0.824 | 0.830 | 0.830 | 0.828 ± 0.003 |
+| Text + audience + voting record, earlier years only | 0.771 | 0.778 | 0.780 | 0.777 ± 0.005 |
+| Text + audience + all listener features | 0.821 | 0.826 | 0.827 | 0.825 ± 0.003 |
+
+Paired comparisons per seed (AUROC difference with its 95% interval):
+
+| Comparison | Seed 42 | Seed 43 | Seed 44 | Mean |
+|---|---|---|---|---|
+| Text + audience − Text only | +0.019 (−0.005 to +0.045) | +0.049 (+0.030 to +0.070) | +0.040 (+0.021 to +0.059) | +0.036 |
+| Text only + voting record − Listener: voting record | +0.046 (+0.031 to +0.061) | +0.039 (+0.026 to +0.052) | +0.044 (+0.031 to +0.057) | +0.043 |
+| Text only + voting record − Text only | +0.117 (+0.092 to +0.143) | +0.132 (+0.106 to +0.157) | +0.124 (+0.097 to +0.151) | +0.125 |
+| Text + audience + voting record − Text + audience | +0.087 (+0.066 to +0.110) | +0.085 (+0.063 to +0.107) | +0.081 (+0.061 to +0.102) | +0.084 |
+
+- **The profile helps.** Text + audience is above text only in all three seeds, by 0.036 on average,
+  and the difference is clear in seeds 43 and 44 (p = 0.0005 each; p = 0.14 for seed 42). Averaging the
+  three seeds inside each bootstrap resample gives +0.036 with a 95% interval of +0.019 to +0.053. That
+  last number comes from a one-off calculation with this script's functions; the script itself does
+  not average over seeds yet.
+- **Seed 42 was the least favourable seed for this comparison:** it has the best text-only model
+  (0.719) and the weakest text + audience model (0.737).
+- **The text adds to the voting record in every seed** (+0.039 to +0.046), and the combination is
+  stable: 0.829 to 0.836.
+- **With the record, the profile still makes no clear difference:** 0.833 without it and 0.828 with it,
+  on average. The seed-42 difference of 0.011 between the two does not repeat (seed 43: 0.829 against
+  0.830; seed 44: 0.834 against 0.830).
+- **Not recorded here:** the Slurm job ids and durations of the four new runs.
 
 ## Notes
 
