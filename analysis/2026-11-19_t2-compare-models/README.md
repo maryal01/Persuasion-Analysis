@@ -40,6 +40,12 @@ same-debate pairs of the listener baseline. Each comparison gets the AUROC diffe
 on the same resamples, and a paired permutation test. Compared by default: every later model with the
 first, and every combination with both of its parts. `--compare ROW OTHER_ROW` adds more.
 
+**Several seeds of one model** are given as folders separated by commas. The row then shows the AUROC
+averaged over the seeds and the standard deviation between them. Its 95% interval is that of the
+average (the seeds are averaged inside every bootstrap resample), so it describes the test votes, not
+the spread between seeds. A combination is fitted once per seed. In a comparison, seeds are paired in
+the order given, and a row with one set of scores is compared with every seed of the other row.
+
 `scripts/train_delta.py` now also saves `predictions_validation.parquet`, for training runs and for
 `--eval-only` runs. Before this change only the test scores were saved.
 
@@ -73,9 +79,16 @@ sbatch -A <account> jobs/train.sub ddo_switch --seed 43 --bf16 --push           
 sbatch -A <account> jobs/train.sub ddo_switch --audience self --seed 43 --bf16 --push    # text + audience
 ```
 
-Each run saves its validation and test scores, so the comparison can be run per seed, for example with
-`--model "Text only=outputs/ddo_switch-seed43" --model "Text + audience=outputs/ddo_switch-audience-self-seed43"`.
-Seeds 43 and 44 were run for both models on 2026-11-19; see "Three seeds" under Results.
+Each run saves its validation and test scores. Seeds 43 and 44 were run for both models on 2026-11-19.
+The comparison over the three seeds (see "Three seeds" under Results):
+
+```bash
+python scripts/t1_t2/compare_models.py --users ddo/users.json \
+    --model "Text only=outputs/ddo_switch,outputs/ddo_switch-seed43,outputs/ddo_switch-seed44" \
+    --model "Text + audience=outputs/ddo_switch-audience-self,outputs/ddo_switch-audience-self-seed43,outputs/ddo_switch-audience-self-seed44" \
+    --compare "Text only + voting record" "Text + audience + voting record" \
+    --output outputs/compare_models_seeds.json
+```
 
 ## Results
 
@@ -142,8 +155,9 @@ possible p-value is 0.0005):
 
 Both trained models were run again with seeds 43 and 44 (`--seed`, same settings; model repos
 `nlp-project-modernbert-ddo_switch-seed43`, `-seed44`, `-ddo_switch-audience-self-seed43`, `-seed44`).
-The script was run once per seed. Test AUROC; the last column is the mean and the standard deviation
-over the three seeds. The listener rows do not depend on the seed.
+Test AUROC; the last column is the mean and the standard deviation over the three seeds. The listener
+rows do not depend on the seed. The 95% intervals of the three-seed averages are 0.679–0.736 for text
+only, 0.716–0.767 for text + audience and 0.808–0.854 for text only + voting record.
 
 | Row | Seed 42 | Seed 43 | Seed 44 | Mean ± std |
 |---|---|---|---|---|
@@ -158,27 +172,31 @@ over the three seeds. The listener rows do not depend on the seed.
 | Text + audience + voting record, earlier years only | 0.771 | 0.778 | 0.780 | 0.777 ± 0.005 |
 | Text + audience + all listener features | 0.821 | 0.826 | 0.827 | 0.825 ± 0.003 |
 
-Paired comparisons per seed (AUROC difference with its 95% interval):
+Paired comparisons (AUROC difference with its 95% interval). The per-seed columns come from one run of
+the script per seed, the last column from the run over all three seeds:
 
-| Comparison | Seed 42 | Seed 43 | Seed 44 | Mean |
+| Comparison | Seed 42 | Seed 43 | Seed 44 | Three seeds together |
 |---|---|---|---|---|
-| Text + audience − Text only | +0.019 (−0.005 to +0.045) | +0.049 (+0.030 to +0.070) | +0.040 (+0.021 to +0.059) | +0.036 |
-| Text only + voting record − Listener: voting record | +0.046 (+0.031 to +0.061) | +0.039 (+0.026 to +0.052) | +0.044 (+0.031 to +0.057) | +0.043 |
-| Text only + voting record − Text only | +0.117 (+0.092 to +0.143) | +0.132 (+0.106 to +0.157) | +0.124 (+0.097 to +0.151) | +0.125 |
-| Text + audience + voting record − Text + audience | +0.087 (+0.066 to +0.110) | +0.085 (+0.063 to +0.107) | +0.081 (+0.061 to +0.102) | +0.084 |
+| Text + audience − Text only | +0.019 (−0.005 to +0.045) | +0.049 (+0.030 to +0.070) | +0.040 (+0.021 to +0.059) | +0.036 (+0.019 to +0.053), p = 0.0005 |
+| Text only + voting record − Listener: voting record | +0.046 (+0.031 to +0.061) | +0.039 (+0.026 to +0.052) | +0.044 (+0.031 to +0.057) | +0.043 (+0.030 to +0.057), p = 0.0005 |
+| Text only + voting record − Text only | +0.117 (+0.092 to +0.143) | +0.132 (+0.106 to +0.157) | +0.124 (+0.097 to +0.151) | +0.125 (+0.099 to +0.150), p = 0.0005 |
+| Text + audience + voting record − Text + audience | +0.087 (+0.066 to +0.110) | +0.085 (+0.063 to +0.107) | +0.081 (+0.061 to +0.102) | +0.084 (+0.064 to +0.106), p = 0.0005 |
+| Text only + voting record − Text + audience + voting record | +0.011 (+0.001 to +0.021) | not run | not run | +0.005 (−0.002 to +0.011), p = 0.17 |
 
-- **The profile helps.** Text + audience is above text only in all three seeds, by 0.036 on average,
-  and the difference is clear in seeds 43 and 44 (p = 0.0005 each; p = 0.14 for seed 42). Averaging the
-  three seeds inside each bootstrap resample gives +0.036 with a 95% interval of +0.019 to +0.053. That
-  last number comes from a one-off calculation with this script's functions; the script itself does
-  not average over seeds yet.
+- **The profile helps.** Text + audience is above text only in all three seeds, and clearly so in
+  seeds 43 and 44 (p = 0.0005 each; p = 0.14 for seed 42). Over the three seeds together the difference
+  is +0.036, with a 95% interval of +0.019 to +0.053.
 - **Seed 42 was the least favourable seed for this comparison:** it has the best text-only model
   (0.719) and the weakest text + audience model (0.737).
 - **The text adds to the voting record in every seed** (+0.039 to +0.046), and the combination is
   stable: 0.829 to 0.836.
-- **With the record, the profile still makes no clear difference:** 0.833 without it and 0.828 with it,
-  on average. The seed-42 difference of 0.011 between the two does not repeat (seed 43: 0.829 against
-  0.830; seed 44: 0.834 against 0.830).
+- **With the record, the profile makes no clear difference:** 0.833 without it and 0.828 with it, on
+  average (+0.005, interval −0.002 to +0.011). The seed-42 difference of 0.011 between the two does not
+  repeat (seed 43: 0.829 against 0.830; seed 44: 0.834 against 0.830).
+- **Seed averaging, checked:** with one folder per model the script gives exactly the rows, intervals
+  and p-values of the seed-42 run above; the three-seed rows equal the averages of the three per-seed
+  runs; the same folder given twice gives a standard deviation of 0 and a difference of exactly 0 to
+  itself; rows with 3 and 2 seeds are refused.
 - **Not recorded here:** the Slurm job ids and durations of the four new runs.
 
 ## Notes
