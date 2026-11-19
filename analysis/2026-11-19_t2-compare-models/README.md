@@ -62,6 +62,19 @@ python scripts/t1_t2/compare_models.py --users ddo/users.json \
 The script streams the id and label columns of `ddo_switch` from the Hub (branch `main`) and takes
 about a minute plus the permutation tests (2,000 per comparison by default).
 
+**More seeds.** `--seed <N>` in `scripts/train_delta.py` sets the training seed (default 42, the seed of
+the first runs). A run with another seed has `-seed<N>` at the end of its name, so it has its own
+`outputs/` folder, markers and model repo and does not touch the first run:
+
+```bash
+sbatch -A <account> jobs/train.sub ddo_switch --seed 43 --bf16 --push                    # text only
+sbatch -A <account> jobs/train.sub ddo_switch --audience self --seed 43 --bf16 --push    # text + audience
+```
+
+Each run saves its validation and test scores, so the comparison can be run per seed, for example with
+`--model "Text only=outputs/ddo_switch-seed43" --model "Text + audience=outputs/ddo_switch-audience-self-seed43"`.
+No run with another seed exists yet.
+
 ## Results
 
 Not run on real model scores yet.
@@ -85,5 +98,12 @@ Not run on real model scores yet.
   is at 50.0% on same-debate pairs; a second model with the same ranking gives a difference of exactly
   0 with p = 1; a model that knows more gives a positive difference with an interval above 0.
   `scripts/train_delta.py` on made-up rows writes the validation file in every mode.
+- **What the seed controls:** the start weights of the classifier on top of the encoder, and the order
+  of the training rows. In the runs made before `--seed` existed, the order was seeded with 42 but the
+  classifier's start weights were not, so those runs cannot be repeated exactly.
+- **The seed option, checked on made-up rows:** the same seed twice gives identical test scores;
+  another seed gives different ones; no `--seed` equals `--seed 42`; `jobs/train.sub` and the script
+  derive the same run name in 13 argument forms. The T3 scripts write to one fixed folder whatever
+  their seed, so `jobs/train.sub` gives names starting with `t3_` no seed suffix.
 - **Two-class configs only.** `ddo_undecided` has three classes and no single score per row.
 - **The prediction files hold voter names.** They stay in `outputs/`, which git ignores.

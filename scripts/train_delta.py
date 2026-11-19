@@ -15,6 +15,7 @@ from transformers import (
     DataCollatorWithPadding,
     Trainer,
     TrainingArguments,
+    set_seed,
 )
 
 from common.audience import AUDIENCE_SOURCES, add_profiles
@@ -29,6 +30,7 @@ GRAD_ACCUM = 8
 EPOCHS = 3
 LR = 2e-5
 SAVE_STEPS = 500  # eval + checkpoint interval; bounds the work lost when a job hits its time limit
+DEFAULT_SEED = 42  # the seed of the first runs; a run with this seed keeps the plain name <config>[-audience-<source>]
 
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
@@ -40,6 +42,10 @@ def parse_args():
     ap.add_argument("--smoke", action="store_true", help="tiny/fast pipeline check")
     ap.add_argument("--bf16", action="store_true", help="train with bf16 mixed precision (default: fp32, as the T1 baseline)")
     ap.add_argument("--freeze", action="store_true", help="freeze the encoder, train only the classifier head (cheap, lower accuracy)")
+    ap.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                    help="training seed: the classifier's start weights and the order of the training rows "
+                         "(default: %(default)s). A run with another seed gets -seed<N> at the end of its name: "
+                         "its own outputs/ folder and model repo")
     ap.add_argument("--audience", choices=AUDIENCE_SOURCES, default="none",
                     help="write the voter's profile in front of the debate (DDO configs only): self = the labels the "
                          "voter reported (ddo_users); inferred = the labels the T3 model predicted from their text "
@@ -132,8 +138,10 @@ def main():
         ds = DatasetDict({k: v.select(range(32)) for k, v in ds.items()})
     if args.audience != "none":
         ds = add_profiles(ds, args.audience, args.shuffle_audience, revision=args.audience_revision)
-    # a text + audience run keeps its own outputs and model repo; jobs/train.sub derives the same name
-    run_name = args.dataset_config + ("" if args.audience == "none" else f"-audience-{args.audience}")
+    # a text + audience run and a run with another seed keep their own outputs and model repo;
+    # jobs/train.sub derives the same name
+    run_name = (args.dataset_config + ("" if args.audience == "none" else f"-audience-{args.audience}")
+                + ("" if args.seed == DEFAULT_SEED else f"-seed{args.seed}"))
     model_repo = f"{MODEL_REPO}-{run_name}"
     evaluate_only = args.eval_only is not None
 
@@ -158,6 +166,9 @@ def main():
             raise SystemExit(f"{source} predicts {model_labels}, but {args.dataset_config} has the classes {label_names}")
         print(f"[EVAL ONLY] scoring the test split with {source}; nothing is trained or pushed")
     else:
+        # The classifier on top of the encoder starts from random weights, drawn here. The Trainer sets
+        # the seed only when it is built, which is after this, so set it now.
+        set_seed(args.seed)
         model = AutoModelForSequenceClassification.from_pretrained(
             MODEL_NAME, num_labels=len(label_names),
             id2label=dict(enumerate(label_names)),
@@ -185,6 +196,7 @@ def main():
         num_train_epochs=epochs,
         max_steps=max_steps,
         learning_rate=LR,
+        seed=args.seed,
         bf16=use_bf16,
         eval_strategy="steps",
         eval_steps=save_steps,
@@ -257,7 +269,7 @@ def main():
         ds[split].select_columns(kept).add_column("logits", logits.tolist()).to_parquet(f"{outputdir}/predictions_{split}{suffix}.parquet")
     with open(f"{outputdir}/test_metrics{suffix}.json", "w") as fh:
         json.dump({"run": run_name, "dataset": {"config": args.dataset_config, "revision": getattr(args, "dataset_revision", None)},
-                   "audience": args.audience, "shuffled_audience": args.shuffle_audience,
+                   "audience": args.audience, "shuffled_audience": args.shuffle_audience, "seed": args.seed,
                    "model": (args.eval_only or model_repo) if evaluate_only else MODEL_NAME, "max_length": max_length,
                    "metrics": metrics, "per_class": per_class}, fh, indent=2)
     print(f"\nWrote {outputdir}/predictions_test{suffix}.parquet, predictions_validation{suffix}.parquet and test_metrics{suffix}.json")

@@ -39,22 +39,33 @@ shift || true
 #   FAILED: a part crashed, so later parts would fail the same way while holding a GPU.
 # A time-limit kill or scancel ends this script outright, so it sets neither.
 # A text + audience run (--audience <source>) has its own outputs and markers, named as in
-# scripts/train_delta.py: outputs/<config>-audience-<source>/. An --eval-only run scores a finished
+# scripts/train_delta.py: outputs/<config>-audience-<source>/. A run with another seed than 42
+# (--seed <N>) has -seed<N> at the end of that name. An --eval-only run scores a finished
 # model, so like a smoke run it neither checks nor sets the markers.
 #   sbatch -A <account> jobs/train.sub ddo_switch --audience self --bf16 --push
+#   sbatch -A <account> jobs/train.sub ddo_switch --audience self --seed 43 --bf16 --push
 #   sbatch -A <account> jobs/train.sub ddo_switch --eval-only --bf16
+# Names starting with t3_ are not dataset configs of scripts/train_delta.py: the T3 scripts write to one
+# fixed folder whatever their seed, so they get no seed suffix here.
 RUN=$CONFIG
+SEED_SUFFIX=
 previous=
 for arg in "$@"; do
-    if [[ $arg == --audience=* ]]; then
-        previous=--audience
-        arg=${arg#--audience=}
-    fi
+    for option in --audience --seed; do
+        if [[ $arg == $option=* ]]; then
+            previous=$option
+            arg=${arg#$option=}
+        fi
+    done
     if [[ $previous == --audience && $arg != none ]]; then
         RUN=$CONFIG-audience-$arg
     fi
+    if [[ $previous == --seed && $arg != 42 && $CONFIG != t3_* ]]; then
+        SEED_SUFFIX=-seed$arg
+    fi
     previous=$arg
 done
+RUN=$RUN$SEED_SUFFIX
 DONE=outputs/$RUN/DONE
 FAILED=outputs/$RUN/FAILED
 SMOKE=false
