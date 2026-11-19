@@ -1,7 +1,9 @@
 # T2 text + audience: the voter's profile in front of the debate
 
-**Status:** code written and checked on a laptop (2026-11-17). No text + audience model is trained yet:
-the runs need GPU jobs on Gilbreth. Profiles can be self-reported, inferred by the T3 model, or both.
+**Status:** one text + audience model trained and scored on Gilbreth (`ddo_switch`, one seed, 2026-11-17
+to 2026-11-19). With the voter's profile the AUROC is 0.737, against 0.719 for text only; whether that
+difference is more than noise is not tested yet. Profiles can be self-reported, inferred by the T3 model,
+or both; given the T3 model's predicted profiles, the same model scores 0.706.
 
 ## Goal
 
@@ -33,9 +35,10 @@ predictions saved per row, and a way to score a trained model again without trai
 - **`--shuffle-audience`** (with `--eval-only`) is the control from the proposal: every test voter gets
   another voter's profile, the same one on all their rows. A model that uses the profile should score
   lower.
-- **Every run now writes** `predictions_test.parquet` (ids, voter, label and the logits of every test
-  row) and `test_metrics.json` to its `outputs/` folder, and prints precision, recall and F1 per class.
-  The shuffled control writes `predictions_test_shuffled.parquet` and `test_metrics_shuffled.json`.
+- **Every run now writes** `predictions_test.parquet` and `predictions_validation.parquet` (ids, voter,
+  label and the logits of every row of the split) and `test_metrics.json` to its `outputs/` folder, and
+  prints precision, recall and F1 per class. The shuffled control writes the same three files with
+  `_shuffled` in the name.
 
 ## Run
 
@@ -61,7 +64,44 @@ from Hub branch `main`.
 
 ## Results
 
-No model results yet. Coverage of the self-reported profiles, from `scripts/common/audience.py`:
+`ddo_switch`, 5,845 test votes (368 switched), one seed per model. Every row scores the same votes.
+The rows named "same model" score the text + audience model again with other profiles.
+
+| Model | Profile at test time | AUROC | F1 (switched) | Precision | Recall | Macro-F1 | Accuracy | Slurm job |
+|---|---|---|---|---|---|---|---|---|
+| Text only | none | 0.719 | 0.217 | 0.138 | 0.511 | 0.540 | 76.8% | 12438101 (`--eval-only`) |
+| Text + audience (`self`) | reported by the voter | 0.737 | 0.237 | 0.157 | 0.484 | 0.562 | 80.4% | 12412876, 12412877 |
+| same model | swapped between voters | 0.682 | 0.202 | 0.131 | 0.440 | 0.537 | 78.1% | 12438102 |
+| same model | predicted by the T3 model (`inferred`) | 0.706 | 0.215 | 0.144 | 0.421 | 0.552 | 80.6% | 12438105 |
+
+- **The profile adds 0.018 AUROC, and that is not tested yet.** A single AUROC on 368 switchers has a
+  rough 95% interval of ±0.03 (`RESULTS.md`), so the two numbers alone do not separate the models. Both
+  models score the same votes, so the test to run is a paired bootstrap over debates on the saved
+  `predictions_test.parquet` files. It is not done. Each model has one seed.
+- **The model uses the profile.** Given other voters' profiles, the same model drops from 0.737 to
+  0.682, below the text-only model. This is one random swap.
+- **Predicted profiles do not replace reported ones.** Given the T3 model's predictions
+  (`ddo_profiles_inferred` on Hub branch `t3`), the same model scores 0.706: below its score with
+  reported profiles and below the text-only model. The T3 model's predicted class equals the
+  self-reported one for under half of the held-out users (`analysis/2026-11-17_t3-inferred-profiles/`).
+  Two things are not separated here. A predicted profile always names all six labels, while reported
+  profiles often leave some out, so the form of the line changes as well as its content. And most
+  predictions used here are for users the T3 model was trained on (the job log prints the share; it is
+  not copied here).
+- **The `filled` model is not trained.** It would add predicted labels only where a voter reported
+  none, about a fifth of the rows.
+- **It stays below the listener-only models.** Without any text, the voter's voting record gives 0.790
+  and all listener features give 0.805 (`analysis/2026-11-16_t2-listener-baseline/`). The profile line
+  holds the six stance labels only, not the voting record.
+- **`--eval-only` reproduces the recorded text-only run.** All six numbers equal the `ddo_switch` row of
+  `RESULTS.md`.
+- **The run.** Model `nlp-final-project11/nlp-project-modernbert-ddo_switch-audience-self` (private),
+  with the settings of the text-only run (3 epochs, at most 4,096 tokens, `--bf16`). Two chained
+  standby jobs, 6h58m in total: job 12412876 hit the 4-hour limit and job 12412877 resumed and finished
+  in 2h58m.
+- **`ddo_undecided` is not run.**
+
+Coverage of the self-reported profiles, from `scripts/common/audience.py`:
 
 | Config | Split | Rows | Voter has a known profile | All six labels known |
 |---|---|---|---|---|
@@ -98,4 +138,4 @@ No model results yet. Coverage of the self-reported profiles, from `scripts/comm
   on the saved model reproduces its test logits exactly; with `--shuffle-audience` the logits change on
   exactly the rows whose profile line changed; a three-class config runs and prints per-class numbers.
   The run-name rule in `jobs/train.sub` was tested for each argument form.
-- **Not checked:** a real run on a GPU, and `--eval-only` against the pushed text-only models.
+- **Not checked:** `--eval-only` against the pushed `ddo_undecided` model.
