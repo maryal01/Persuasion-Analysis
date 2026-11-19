@@ -71,6 +71,7 @@ The rows named "same model" score the text + audience model again with other pro
 | Text only | none | 0.719 | 0.217 | 0.138 | 0.511 | 0.540 | 76.8% | 12438101 (`--eval-only`) |
 | Text + audience (`self`) | reported by the voter | 0.737 | 0.237 | 0.157 | 0.484 | 0.562 | 80.4% | 12412876, 12412877 |
 | same model | swapped between voters | 0.682 | 0.202 | 0.131 | 0.440 | 0.537 | 78.1% | 12438102 |
+| same model | predicted by the T3 model (`inferred`) | 0.706 | 0.215 | 0.144 | 0.421 | 0.552 | 80.6% | 12438105 |
 
 - **The profile adds 0.018 AUROC, and that is not tested yet.** A single AUROC on 368 switchers has a
   rough 95% interval of ±0.03 (`RESULTS.md`), so the two numbers alone do not separate the models. Both
@@ -78,6 +79,16 @@ The rows named "same model" score the text + audience model again with other pro
   `predictions_test.parquet` files. It is not done. Each model has one seed.
 - **The model uses the profile.** Given other voters' profiles, the same model drops from 0.737 to
   0.682, below the text-only model. This is one random swap.
+- **Predicted profiles do not replace reported ones.** Given the T3 model's predictions
+  (`ddo_profiles_inferred` on Hub branch `t3`), the same model scores 0.706: below its score with
+  reported profiles and below the text-only model. The T3 model's predicted class equals the
+  self-reported one for under half of the held-out users (`analysis/2026-11-17_t3-inferred-profiles/`).
+  Two things are not separated here. A predicted profile always names all six labels, while reported
+  profiles often leave some out, so the form of the line changes as well as its content. And most
+  predictions used here are for users the T3 model was trained on (the job log prints the share; it is
+  not copied here).
+- **The `filled` model is not trained.** It would add predicted labels only where a voter reported
+  none, about a fifth of the rows.
 - **It stays below the listener-only models.** Without any text, the voter's voting record gives 0.790
   and all listener features give 0.805 (`analysis/2026-11-16_t2-listener-baseline/`). The profile line
   holds the six stance labels only, not the voting record.
