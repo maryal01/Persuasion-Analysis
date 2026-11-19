@@ -13,6 +13,12 @@ the test split:
      and the listener model's score, is then fitted on the VALIDATION split and scored once on the test
      split. The test split is never used for fitting.
 
+Several seeds of one model: give their folders (or files) separated by commas. The row then shows the
+AUROC averaged over the seeds, with the standard deviation between seeds. Its 95% interval is that of
+the average (the seeds are averaged inside every bootstrap resample), so it describes the test votes,
+not the spread between seeds. A combination is fitted once per seed. In a comparison, seeds are paired
+in the order given; a row with one set of scores is compared with every seed of the other row.
+
 The voting record is not part of the audience description in the project proposal (that is the stance
 profile). Rows that use it are an extension and are named so in the output.
 
@@ -23,6 +29,8 @@ Usage (from the repository root; the prediction files come from Gilbreth, see th
         --model "Text only=outputs/ddo_switch" \
         --model "Text + audience=outputs/ddo_switch-audience-self" \
         --output outputs/compare_models.json
+Three seeds per model:
+        --model "Text only=outputs/ddo_switch,outputs/ddo_switch-seed43,outputs/ddo_switch-seed44"
 Optional rows that have test scores only (controls), and extra comparisons by row name:
         --test-scores "Text + audience, swapped profiles=outputs/ddo_switch-audience-self/predictions_test_shuffled.parquet" \
         --compare "Text + audience" "Text + audience, swapped profiles"
@@ -30,7 +38,7 @@ Optional rows that have test scores only (controls), and extra comparisons by ro
 import argparse
 import json
 import os
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -48,14 +56,18 @@ LISTENER_MODELS = {
     "Listener: profile + voting record + side x year": ("all listener features", ["profile", "record", "context"]),
 }
 
+Scores = List[np.ndarray]  # the scores of one row of the result table: one array per seed
+
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Compare saved T2 model scores and combine them with the listener baseline.")
-    ap.add_argument("--model", action="append", required=True, metavar="NAME=FOLDER",
+    ap.add_argument("--model", action="append", required=True, metavar="NAME=FOLDER[,FOLDER...]",
                     help="a run's outputs/ folder with predictions_validation.parquet and predictions_test.parquet; "
-                         "repeat for several models. Later models are compared with the first.")
-    ap.add_argument("--test-scores", action="append", default=[], metavar="NAME=FILE",
-                    help="a predictions_test*.parquet file that gets a row but no combination (controls); repeatable")
+                         "several folders separated by commas are seeds of one model. Repeat for several models. "
+                         "Later models are compared with the first.")
+    ap.add_argument("--test-scores", action="append", default=[], metavar="NAME=FILE[,FILE...]",
+                    help="a predictions_test*.parquet file that gets a row but no combination (controls); "
+                         "several files separated by commas are seeds; repeatable")
     ap.add_argument("--compare", action="append", default=[], nargs=2, metavar=("ROW", "OTHER_ROW"),
                     help="an extra comparison, ROW minus OTHER_ROW, by row name; repeatable")
     ap.add_argument("--users", default="ddo/users.json", help="users.json of the DDO corpus (default: %(default)s)")
@@ -68,14 +80,15 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-def named(pairs: Sequence[str], what: str) -> Dict[str, str]:
-    """Parse repeated NAME=PATH arguments, keeping their order."""
+def named(pairs: Sequence[str], what: str) -> Dict[str, List[str]]:
+    """Parse repeated NAME=PATH[,PATH...] arguments, keeping their order: name -> one path per seed."""
     out = {}
     for pair in pairs:
-        name, _, path = pair.partition("=")
-        if not name or not path or name in out:
-            raise SystemExit(f"--{what} needs NAME=PATH with a new name each time, got {pair!r}")
-        out[name] = path
+        name, _, paths = pair.partition("=")
+        seeds = [path for path in paths.split(",") if path]
+        if not name or not seeds or name in out:
+            raise SystemExit(f"--{what} needs NAME=PATH[,PATH...] with a new name each time, got {pair!r}")
+        out[name] = seeds
     return out
 
 
@@ -134,15 +147,16 @@ def debate_groups(debates: Sequence[str]) -> List[np.ndarray]:
     return [np.array(rows) for rows in index.values()]
 
 
-def bootstrap_aurocs(y: np.ndarray, scores: Dict[str, np.ndarray], groups: List[np.ndarray], resamples: int) -> Dict[str, np.ndarray]:
-    """AUROC of every row of the table on the same resamples of whole debates, so that two rows can be
-    compared resample by resample. The resamples are the listener baseline's (same seed, same order)."""
+def bootstrap_aurocs(y: np.ndarray, scores: Dict[str, Scores], groups: List[np.ndarray], resamples: int) -> Dict[str, np.ndarray]:
+    """AUROC of every row of the table, averaged over its seeds, on the same resamples of whole debates,
+    so that two rows can be compared resample by resample. The resamples are the listener baseline's
+    (same seed, same order)."""
     rng = np.random.default_rng(SEED)
     draws = {name: np.empty(resamples) for name in scores}
     for r in range(resamples):
         rows = np.concatenate([groups[g] for g in rng.integers(0, len(groups), len(groups))])
-        for name, s in scores.items():
-            draws[name][r] = auroc(y[rows], s[rows])
+        for name, per_seed in scores.items():
+            draws[name][r] = np.mean([auroc(y[rows], s[rows]) for s in per_seed])
     return draws
 
 
@@ -151,40 +165,61 @@ def interval(values: np.ndarray) -> Tuple[float, float]:
     return float(np.nanpercentile(values, 2.5)), float(np.nanpercentile(values, 97.5))
 
 
-def permutation_p(y: np.ndarray, a: np.ndarray, b: np.ndarray, groups: List[np.ndarray], permutations: int,
-                  rng: np.random.Generator) -> float:
-    """Two-sided paired permutation test of the AUROC difference between two models on the same rows.
+def paired_seeds(a: Scores, b: Scores, what: str) -> Tuple[Scores, Scores]:
+    """Line up the seeds of two rows: seed by seed in the order given, or a row with one set of scores
+    against every seed of the other row."""
+    if len(a) != len(b) and min(len(a), len(b)) != 1:
+        raise SystemExit(f"cannot compare {what}: one row has {len(a)} seeds and the other {len(b)}")
+    longest = max(len(a), len(b))
+    return (a * longest if len(a) == 1 else a), (b * longest if len(b) == 1 else b)
+
+
+def permutation_p(y: np.ndarray, a: Scores, b: Scores, groups: List[np.ndarray], permutations: int,
+                  rng: np.random.Generator, what: str = "these rows") -> float:
+    """Two-sided paired permutation test of the AUROC difference between two rows on the same test rows.
 
     Under "the two models are interchangeable", swapping their scores changes nothing, so in each
     permutation the two scores are swapped for all rows of a debate with probability 1/2 (whole debates,
     as in the bootstrap). Scores are replaced by their ranks first: that puts both models on one scale
-    and does not change a model's own AUROC.
+    and does not change a model's own AUROC. With several seeds the swap is applied to every pair of
+    seeds at once, and the statistic is the difference averaged over the seeds.
     """
-    a, b = rankdata(a), rankdata(b)
-    observed = abs(auroc(y, a) - auroc(y, b))
+    a, b = paired_seeds([rankdata(s) for s in a], [rankdata(s) for s in b], what)
+
+    def difference(first: Scores, second: Scores) -> float:
+        return float(np.mean([auroc(y, f) - auroc(y, s) for f, s in zip(first, second)]))
+
+    observed = abs(difference(a, b))
     debate_of_row = np.empty(len(y), dtype=int)
     for g, rows in enumerate(groups):
         debate_of_row[rows] = g
     at_least_as_large = 0
     for _ in range(permutations):
         swap = (rng.random(len(groups)) < 0.5)[debate_of_row]
-        difference = auroc(y, np.where(swap, b, a)) - auroc(y, np.where(swap, a, b))
-        at_least_as_large += abs(difference) >= observed - 1e-12
+        swapped = difference([np.where(swap, s_b, s_a) for s_a, s_b in zip(a, b)],
+                             [np.where(swap, s_a, s_b) for s_a, s_b in zip(a, b)])
+        at_least_as_large += abs(swapped) >= observed - 1e-12
     return (at_least_as_large + 1) / (permutations + 1)
 
 
 def print_results(rows: Dict[str, Dict[str, Any]], comparisons: List[Dict[str, Any]], n_test: int, n_pairs: int) -> None:
     width = max(len(name) for name in rows)
     print(f"\n=== TEST AUROC ({n_test} rows; 95% interval from a bootstrap over debates) ===")
-    print(f"  {'row':{width}s} {'val':>6s} {'AUROC':>6s}  {'95% interval':12s} {'same-debate pairs':>17s}")
+    print(f"  {'row':{width}s} {'seeds':>5s} {'val':>6s} {'AUROC':>6s} {'std':>6s}  {'95% interval':12s} {'same-debate pairs':>17s}")
     for name, r in rows.items():
         val = "-" if r["validation_auroc"] is None else f"{r['validation_auroc']:.3f}"
+        std = "-" if r["test_auroc_std"] is None else f"{r['test_auroc_std']:.3f}"
         low, high = r["test_auroc_ci95"]
-        print(f"  {name:{width}s} {val:>6s} {r['test_auroc']:6.3f}  {f'{low:.3f}-{high:.3f}':12s} {r['same_debate_pair_accuracy']:17.1%}")
+        print(f"  {name:{width}s} {r['seeds']:5d} {val:>6s} {r['test_auroc']:6.3f} {std:>6s}  {f'{low:.3f}-{high:.3f}':12s} "
+              f"{r['same_debate_pair_accuracy']:17.1%}")
+        if r["seeds"] > 1:
+            print(f"  {'':{width}s}   per seed: " + ", ".join(f"{value:.3f}" for value in r["test_auroc_per_seed"]))
         if "weights" in r:
             print(f"  {'':{width}s}   weights of the standardised scores: "
                   + ", ".join(f"{part} {weight:+.2f}" for part, weight in r["weights"].items()))
     print("  (val: validation AUROC; '-' for a combination, which is fitted on the validation split)")
+    print("  (with several seeds: AUROC, val, pairs and weights are averages over the seeds, std is the standard")
+    print("   deviation between seeds, and the interval is that of the average)")
     print(f"  (same-debate pairs: {n_pairs} pairs of a switcher and a stayer from one debate with the same side before)")
 
     print("\n=== PAIRED COMPARISONS on the test split (first row minus second row) ===")
@@ -204,16 +239,17 @@ def main() -> None:
     print(f"[{args.dataset_config}] test: {len(y['test'])} rows, {int(y['test'].sum())} {label_names[1]}; "
           f"validation: {len(y['validation'])} rows, {int(y['validation'].sum())} {label_names[1]}")
 
-    # Scores per row of the result table: validation (None for controls and combinations) and test.
-    validation: Dict[str, Any] = {}
-    test: Dict[str, np.ndarray] = {}
-    for name, folder in model_folders.items():
-        validation[name] = read_scores(os.path.join(folder, "predictions_validation.parquet"), splits["validation"])
-        test[name] = read_scores(os.path.join(folder, "predictions_test.parquet"), splits["test"])
-    for name, path in control_files.items():
+    # Scores per row of the result table, one array per seed: validation (None for controls and
+    # combinations) and test.
+    validation: Dict[str, Optional[Scores]] = {}
+    test: Dict[str, Scores] = {}
+    for name, folders in model_folders.items():
+        validation[name] = [read_scores(os.path.join(f, "predictions_validation.parquet"), splits["validation"]) for f in folders]
+        test[name] = [read_scores(os.path.join(f, "predictions_test.parquet"), splits["test"]) for f in folders]
+    for name, paths in control_files.items():
         if name in test:
             raise SystemExit(f"two rows are named {name!r}")
-        validation[name], test[name] = None, read_scores(path, splits["test"])
+        validation[name], test[name] = None, [read_scores(path, splits["test"]) for path in paths]
 
     voters = {v for rows in splits.values() for v in rows["voter"]}
     groups = {
@@ -223,38 +259,51 @@ def main() -> None:
         "record_past": record_features(splits, 2, earlier_years_only=True),
     }
     for name, (_, parts) in LISTENER_MODELS.items():
-        validation[name], test[name] = listener_scores(groups, parts, y)
+        listener_validation, listener_test = listener_scores(groups, parts, y)
+        validation[name], test[name] = [listener_validation], [listener_test]
 
-    # Text model + listener model, fitted on the validation split. Each is compared with both of its parts.
+    # Text model + listener model, fitted on the validation split, once per seed of the text model. Each
+    # combination is compared with both of its parts.
     comparisons = [(name, next(iter(model_folders))) for name in list(model_folders)[1:]]
     weights = {}
     for model in model_folders:
         for listener, (short, _) in LISTENER_MODELS.items():
             name = f"{model} + {short}"
-            test[name], w = combine([validation[model], validation[listener]], [test[model], test[listener]], y["validation"])
-            validation[name], weights[name] = None, {model: w[0], listener: w[1]}
+            fitted = [combine([v, validation[listener][0]], [t, test[listener][0]], y["validation"])
+                      for v, t in zip(validation[model], test[model])]
+            validation[name], test[name] = None, [scores for scores, _ in fitted]
+            weights[name] = {model: float(np.mean([w[0] for _, w in fitted])), listener: float(np.mean([w[1] for _, w in fitted]))}
             comparisons += [(name, listener), (name, model)]
     for row, other in args.compare:
         if row not in test or other not in test:
             raise SystemExit(f"--compare: no row named {row!r} or {other!r}; rows are: {', '.join(test)}")
         comparisons.append((row, other))
+    for row, other in comparisons:  # refuse rows whose seeds cannot be paired before the slow part starts
+        paired_seeds(test[row], test[other], f"{row!r} with {other!r}")
 
     debates = splits["test"]["debate_id"]
     groups_of_rows = debate_groups(debates)
     draws = bootstrap_aurocs(y["test"], test, groups_of_rows, args.bootstrap)
     rows, n_pairs = {}, 0
-    for name, scores in test.items():
-        pair_accuracy, n_pairs = same_debate_pairs(y["test"], scores, debates, splits["test"]["before"])
-        rows[name] = {"validation_auroc": None if validation[name] is None else auroc(y["validation"], validation[name]),
-                      "test_auroc": auroc(y["test"], scores), "test_auroc_ci95": interval(draws[name]),
-                      "same_debate_pair_accuracy": pair_accuracy}
+    for name, per_seed in test.items():
+        aurocs = [auroc(y["test"], scores) for scores in per_seed]
+        pairs = [same_debate_pairs(y["test"], scores, debates, splits["test"]["before"]) for scores in per_seed]
+        n_pairs = pairs[0][1]
+        rows[name] = {"seeds": len(per_seed),
+                      "validation_auroc": None if validation[name] is None
+                      else float(np.mean([auroc(y["validation"], scores) for scores in validation[name]])),
+                      "test_auroc": float(np.mean(aurocs)), "test_auroc_per_seed": aurocs,
+                      "test_auroc_std": float(np.std(aurocs, ddof=1)) if len(aurocs) > 1 else None,
+                      "test_auroc_ci95": interval(draws[name]),
+                      "same_debate_pair_accuracy": float(np.mean([accuracy for accuracy, _ in pairs]))}
         if name in weights:
             rows[name]["weights"] = weights[name]
     rng = np.random.default_rng(SEED)
     results = [{"row": row, "other_row": other,
                 "difference": rows[row]["test_auroc"] - rows[other]["test_auroc"],
                 "difference_ci95": interval(draws[row] - draws[other]),
-                "permutation_p": permutation_p(y["test"], test[row], test[other], groups_of_rows, args.permutations, rng)}
+                "permutation_p": permutation_p(y["test"], test[row], test[other], groups_of_rows, args.permutations, rng,
+                                               what=f"{row!r} with {other!r}")}
                for row, other in comparisons]
     print_results(rows, results, len(y["test"]), n_pairs)
 
