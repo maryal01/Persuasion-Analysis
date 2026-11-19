@@ -35,9 +35,10 @@ predictions saved per row, and a way to score a trained model again without trai
 - **`--shuffle-audience`** (with `--eval-only`) is the control from the proposal: every test voter gets
   another voter's profile, the same one on all their rows. A model that uses the profile should score
   lower.
-- **Every run now writes** `predictions_test.parquet` (ids, voter, label and the logits of every test
-  row) and `test_metrics.json` to its `outputs/` folder, and prints precision, recall and F1 per class.
-  The shuffled control writes `predictions_test_shuffled.parquet` and `test_metrics_shuffled.json`.
+- **Every run now writes** `predictions_test.parquet` and `predictions_validation.parquet` (ids, voter,
+  label and the logits of every row of the split) and `test_metrics.json` to its `outputs/` folder, and
+  prints precision, recall and F1 per class. The shuffled control writes the same three files with
+  `_shuffled` in the name.
 
 ## Run
 

@@ -246,18 +246,21 @@ def main():
         tok.save_pretrained(outputdir)
         print(f"\nSaved model locally -> {outputdir}/  (add --push to upload)")
 
-    # Test scores per row, for paired comparisons between models: every column that is not model input
-    # (ids, voter, label) plus the logits. The shuffled-profile control gets its own files.
+    # Scores per row, for paired comparisons between models and for combining a model with other
+    # features (scripts/t1_t2/compare_models.py): every column that is not model input (ids, voter, label)
+    # plus the logits. The validation split is saved too, so that a combination can be fitted without the
+    # test split. The shuffled-profile control gets its own files.
     suffix = "_shuffled" if args.shuffle_audience else ""
     os.makedirs(outputdir, exist_ok=True)
     kept = [c for c in ds["test"].column_names if c not in tok.model_input_names]
-    ds["test"].select_columns(kept).add_column("logits", pred.predictions.tolist()).to_parquet(f"{outputdir}/predictions_test{suffix}.parquet")
+    for split, logits in (("test", pred.predictions), ("validation", trainer.predict(ds["validation"]).predictions)):
+        ds[split].select_columns(kept).add_column("logits", logits.tolist()).to_parquet(f"{outputdir}/predictions_{split}{suffix}.parquet")
     with open(f"{outputdir}/test_metrics{suffix}.json", "w") as fh:
         json.dump({"run": run_name, "dataset": {"config": args.dataset_config, "revision": getattr(args, "dataset_revision", None)},
                    "audience": args.audience, "shuffled_audience": args.shuffle_audience,
                    "model": (args.eval_only or model_repo) if evaluate_only else MODEL_NAME, "max_length": max_length,
                    "metrics": metrics, "per_class": per_class}, fh, indent=2)
-    print(f"\nWrote {outputdir}/predictions_test{suffix}.parquet and test_metrics{suffix}.json")
+    print(f"\nWrote {outputdir}/predictions_test{suffix}.parquet, predictions_validation{suffix}.parquet and test_metrics{suffix}.json")
 
 if __name__ == "__main__":
     main()
