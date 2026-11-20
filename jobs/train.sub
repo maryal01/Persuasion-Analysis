@@ -42,12 +42,14 @@ shift || true
 # scripts/train_delta.py: outputs/<config>-audience-<source>/. A run with the voter's voting record
 # (--voter-record <kind>) has -record-<kind> after that, and a run with another seed than 42
 # (--seed <N>) has -seed<N> at the end. A run on the temporal split (--split temporal) has -temporal
-# right after the config. An --eval-only run scores a finished
+# right after the config, and a run with another token limit than 4096 (--max-length <N>, the
+# MAX_LENGTH of scripts/train_delta.py) has -len<N> before the seed. An --eval-only run scores a finished
 # model, so like a smoke run it neither checks nor sets the markers.
 #   sbatch -A <account> jobs/train.sub ddo_switch --audience self --bf16 --push
 #   sbatch -A <account> jobs/train.sub ddo_switch --audience self --seed 43 --bf16 --push
 #   sbatch -A <account> jobs/train.sub ddo_switch --voter-record all --bf16 --push
 #   sbatch -A <account> jobs/train.sub ddo_switch --split temporal --audience self --bf16 --push
+#   sbatch -A <account> jobs/train.sub ddo_switch --audience self --max-length 8192 --bf16 --push
 #   sbatch -A <account> jobs/train.sub ddo_switch --eval-only --bf16
 # Names starting with t3_ are not dataset configs of scripts/train_delta.py: the T3 scripts write to one
 # fixed folder whatever their seed, so they get no suffix here.
@@ -55,10 +57,11 @@ RUN=$CONFIG
 SPLIT_SUFFIX=
 AUDIENCE_SUFFIX=
 RECORD_SUFFIX=
+LENGTH_SUFFIX=
 SEED_SUFFIX=
 previous=
 for arg in "$@"; do
-    for option in --split --audience --voter-record --seed; do
+    for option in --split --audience --voter-record --max-length --seed; do
         if [[ $arg == $option=* ]]; then
             previous=$option
             arg=${arg#$option=}
@@ -73,12 +76,15 @@ for arg in "$@"; do
     if [[ $previous == --voter-record && $arg != none && $CONFIG != t3_* ]]; then
         RECORD_SUFFIX=-record-$arg
     fi
+    if [[ $previous == --max-length && $arg != 4096 && $CONFIG != t3_* ]]; then
+        LENGTH_SUFFIX=-len$arg
+    fi
     if [[ $previous == --seed && $arg != 42 && $CONFIG != t3_* ]]; then
         SEED_SUFFIX=-seed$arg
     fi
     previous=$arg
 done
-RUN=$CONFIG$SPLIT_SUFFIX$AUDIENCE_SUFFIX$RECORD_SUFFIX$SEED_SUFFIX
+RUN=$CONFIG$SPLIT_SUFFIX$AUDIENCE_SUFFIX$RECORD_SUFFIX$LENGTH_SUFFIX$SEED_SUFFIX
 DONE=outputs/$RUN/DONE
 FAILED=outputs/$RUN/FAILED
 SMOKE=false
