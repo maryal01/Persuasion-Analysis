@@ -22,11 +22,16 @@ After training, the validation and test predictions (class and probabilities per
 written next to the checkpoints, and the test table is printed with 95% intervals from a bootstrap over
 users.
 
+A run with another seed than 42 (--seed <N>) keeps its own folder and model repo, named
+t3_profiles-seed<N>. The seed sets the classifier's start weights, the order of the training users and
+the order of each user's items, so for a user with a long history it also changes which items are read.
+
 Usage (from the repository root):
     python scripts/t3/train.py --smoke
     python scripts/t3/train.py --bf16 --push
 On Gilbreth (one 4-hour standby job should be enough; queue a second part to be safe):
     sbatch -A <account> jobs/train.sub t3_profiles --bf16 --push
+    sbatch -A <account> jobs/train.sub t3_profiles --seed 43 --bf16 --push
 """
 import argparse
 import json
@@ -47,6 +52,7 @@ from transformers import (
     DataCollatorWithPadding,
     Trainer,
     TrainingArguments,
+    set_seed,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -54,6 +60,7 @@ from baselines import SMOKE_ROWS, SPLITS, bootstrap_by_user, load_items, load_us
 from train_delta import last_complete_checkpoint  # noqa: E402  (shared with the T1/T2 training script)
 
 RUN_NAME = "t3_profiles"  # outputs/<RUN_NAME>/ and the config name for jobs/train.sub
+DEFAULT_SEED = 42  # the seed of the first run; a run with this seed keeps the plain name
 MODEL_NAME = "answerdotai/ModernBERT-base"
 MODEL_REPO = f"nlp-final-project11/nlp-project-modernbert-{RUN_NAME}"
 MAX_LENGTH = 4096
@@ -81,9 +88,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--max-length", type=int, default=MAX_LENGTH, help="tokens read per user (default: %(default)s)")
     ap.add_argument("--no-class-weights", action="store_true",
                     help="plain cross-entropy; the default weights classes by inverse frequency within each label")
-    ap.add_argument("--seed", type=int, default=42, help="training seed and item order (default: %(default)s)")
+    ap.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                    help="training seed and item order (default: %(default)s). A run with another seed gets "
+                         "-seed<N> at the end of its name: its own outputs/ folder and model repo")
     ap.add_argument("--bootstrap", type=int, default=1000, help="bootstrap resamples of the test users")
-    ap.add_argument("--push", action="store_true", help=f"push the model to the private repo {MODEL_REPO}")
+    ap.add_argument("--push", action="store_true",
+                    help=f"push the model to the private repo {MODEL_REPO} (with -seed<N> for another seed)")
     ap.add_argument("--smoke", action="store_true", help="tiny/fast pipeline check")
     ap.add_argument("--bf16", action="store_true", help="train with bf16 mixed precision (default: fp32)")
     ap.add_argument("--cpu", action="store_true", help="do not use a GPU (local checks only)")
@@ -257,6 +267,9 @@ def main() -> None:
           f"{np.mean(lengths >= max_length):.1%} cut at {max_length}")
 
     names = [f"{column}={cls}" for column, classes in class_names.items() for cls in classes]
+    # The classifier on top of the encoder starts from random weights, drawn here. The Trainer sets the
+    # seed only when it is built, which is after this, so set it now.
+    set_seed(args.seed)
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_name, num_labels=len(names),
         id2label=dict(enumerate(names)),  # "<label column>=<class>", in the order of the logits
@@ -270,8 +283,11 @@ def main() -> None:
     print(f"[PRECISION] {'bf16 mixed precision' if use_bf16 else 'fp32'}")
     steps_per_epoch = math.ceil(len(ds["train"]) / (batch_size * grad_accum))
     save_steps = 2 if args.smoke else max(1, steps_per_epoch // EVALS_PER_EPOCH)
+    # a run with another seed keeps its own outputs and model repo; jobs/train.sub derives the same name
+    run_name = RUN_NAME + ("" if args.seed == DEFAULT_SEED else f"-seed{args.seed}")
+    model_repo = MODEL_REPO + ("" if args.seed == DEFAULT_SEED else f"-seed{args.seed}")
     # smoke runs get their own dir so a real run never resumes from a smoke checkpoint
-    outputdir = f"outputs/{RUN_NAME}" + ("-smoke" if args.smoke else "")
+    outputdir = f"outputs/{run_name}" + ("-smoke" if args.smoke else "")
     targs = TrainingArguments(
         output_dir=outputdir,
         per_device_train_batch_size=batch_size,
@@ -293,7 +309,7 @@ def main() -> None:
         metric_for_best_model="mean_macro_f1",
         report_to="none",
         push_to_hub=args.push and not args.smoke,
-        hub_model_id=MODEL_REPO,
+        hub_model_id=model_repo,
         hub_private_repo=True,  # only applies when the repo is created; change visibility on the Hub
         # no hub_token: it would be pickled into every checkpoint's training_args.bin and pushed
         # with the model; the Hub client reads HF_TOKEN from the environment instead
@@ -306,7 +322,7 @@ def main() -> None:
         compute_loss_func=multi_label_loss(blocks, weights),
     )
 
-    # Continue a run cut off by a time limit; delete outputs/<RUN_NAME> to start over.
+    # Continue a run cut off by a time limit; delete outputs/<run name> to start over.
     resume: Optional[str] = None if args.smoke else last_complete_checkpoint(outputdir)
     if resume:
         print(f"[RESUME] continuing from {resume}")
@@ -322,7 +338,7 @@ def main() -> None:
     # written below (one row per user, with user names) stay on this machine and are not uploaded.
     if args.push and not args.smoke:
         trainer.push_to_hub()
-        print(f"\nPushed model -> https://huggingface.co/{MODEL_REPO} (private)")
+        print(f"\nPushed model -> https://huggingface.co/{model_repo} (private)")
     elif not args.smoke:
         trainer.save_model(outputdir)
         tok.save_pretrained(outputdir)
@@ -332,7 +348,7 @@ def main() -> None:
         save_predictions(f"{outputdir}/predictions_{split}.parquet", split_users[split], logits[split],
                          split_labels[split], blocks)
     with open(f"{outputdir}/test_metrics.json", "w") as fh:
-        json.dump({"dataset": {"repo": args.dataset_repo, "revision": args.dataset_revision},
+        json.dump({"run": run_name, "dataset": {"repo": args.dataset_repo, "revision": args.dataset_revision},
                    "options": {"model": args.model_name, "max_length": max_length, "seed": args.seed,
                                "class_weights": not args.no_class_weights, "bf16": use_bf16, "smoke": args.smoke},
                    "users": {split: len(ds[split]) for split in SPLITS}, "labels": results}, fh, indent=2)

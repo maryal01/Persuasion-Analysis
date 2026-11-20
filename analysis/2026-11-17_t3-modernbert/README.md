@@ -38,11 +38,13 @@ social issues, personal liberties, foreign policy, religion, political ideology 
 python scripts/t3/train.py --smoke                                 # about 1 minute, also works without a GPU (--cpu)
 sbatch -A <account> jobs/train.sub t3_profiles --smoke --bf16      # the same check on Gilbreth
 sbatch -A <account> jobs/train.sub t3_profiles --bf16 --push       # the real run
+sbatch -A <account> jobs/train.sub t3_profiles --seed 43 --bf16 --push   # another seed, in its own folder and repo
 ```
 
 `jobs/train.sub` starts `scripts/t3/train.py` when the name is `t3_profiles` and passes the other
 arguments through. `--push` uploads the model to the private repo
-`nlp-final-project11/nlp-project-modernbert-t3_profiles`.
+`nlp-final-project11/nlp-project-modernbert-t3_profiles`. A run with another seed than 42 is named
+`t3_profiles-seed<N>`: its own `outputs/` folder, markers and model repo.
 
 ## Results
 
@@ -83,10 +85,19 @@ Accuracy:
   policy) and not clearly different from it on the other three. Weighting classes trades accuracy for
   the small classes. The class-weighted TF-IDF model pays less for that: its accuracy is 0.02 to 0.06
   above ModernBERT's on every label.
-- **One seed, one setting.** No other learning rate, number of epochs or token limit was tried.
+- **One seed, one setting.** No other learning rate, number of epochs or token limit was tried. The
+  proposal asks for three seeds; seeds 43 and 44 can be run since 2026-11-19 (see Run) and are not run
+  yet.
 
 ## Notes
 
+- **What the seed controls** (`--seed`, added 2026-11-19 for runs with other seeds): the start weights
+  of the classifier on top of the encoder, the order of the training users, and the order of each
+  user's items. For a user with more text than the model reads, another seed therefore reads another
+  part of their history. In the seed-42 run above the classifier's start weights were not seeded, so
+  that run cannot be repeated exactly. Checked on made-up users: the same seed twice gives identical
+  predictions, another seed gives different ones, no `--seed` equals `--seed 42`, and `jobs/train.sub`
+  names the run as the script does in 7 argument forms.
 - **Size of the run.** 14,725 training, 1,831 validation and 1,841 test users (the same 18,397 users
   as the baselines). 461 steps per epoch, 1,383 in total. Documents have a median of 1,410 tokens and
   27% are cut at 4,096. A batch of four is padded to 3,586 tokens on average, so a step should cost
