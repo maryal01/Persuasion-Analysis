@@ -19,6 +19,7 @@ from transformers import (
 )
 
 from common.audience import AUDIENCE_SOURCES, add_profiles
+from common.splits import SPLIT_KINDS, temporal_split
 from common.voter_record import RECORD_KINDS, add_records
 
 DATASET_REPO = "nlp-final-project11/persuasion-datasets"
@@ -47,6 +48,11 @@ def parse_args():
                     help="training seed: the classifier's start weights and the order of the training rows "
                          "(default: %(default)s). A run with another seed gets -seed<N> at the end of its name: "
                          "its own outputs/ folder and model repo")
+    ap.add_argument("--split", choices=SPLIT_KINDS, default="random",
+                    help="random = the split by debate that is stored on the Hub; temporal = train on debates "
+                         "through 2015 and test on later ones (DDO configs only; the proposal's robustness check, "
+                         "see scripts/common/splits.py). Such a run has -temporal after the config in its name "
+                         "(default: %(default)s)")
     ap.add_argument("--audience", choices=AUDIENCE_SOURCES, default="none",
                     help="write the voter's profile in front of the debate (DDO configs only): self = the labels the "
                          "voter reported (ddo_users); inferred = the labels the T3 model predicted from their text "
@@ -140,15 +146,18 @@ def main():
     save_steps = 2   if args.smoke else SAVE_STEPS
 
     ds = load_dataset(DATASET_REPO, args.dataset_config, revision=args.dataset_revision, token=HF_TOKEN).rename_column("label", "labels")
+    if args.split == "temporal":  # before a smoke run picks its rows, so that it has rows in every part
+        ds = temporal_split(ds)
     if args.smoke:
         ds = DatasetDict({k: v.select(range(32)) for k, v in ds.items()})
     if args.audience != "none":
         ds = add_profiles(ds, args.audience, args.shuffle_audience, revision=args.audience_revision)
     if args.voter_record != "none":  # after the profile, so the input is: resolution, side before, profile, record, debate
         ds = add_records(ds, args.voter_record, shuffle=args.shuffle_audience)
-    # a run with a profile, a voting record or another seed keeps its own outputs and model repo;
-    # jobs/train.sub derives the same name
-    run_name = (args.dataset_config + ("" if args.audience == "none" else f"-audience-{args.audience}")
+    # a run with another split, a profile, a voting record or another seed keeps its own outputs and
+    # model repo; jobs/train.sub derives the same name
+    run_name = (args.dataset_config + ("" if args.split == "random" else f"-{args.split}")
+                + ("" if args.audience == "none" else f"-audience-{args.audience}")
                 + ("" if args.voter_record == "none" else f"-record-{args.voter_record}")
                 + ("" if args.seed == DEFAULT_SEED else f"-seed{args.seed}"))
     model_repo = f"{MODEL_REPO}-{run_name}"
@@ -278,7 +287,7 @@ def main():
         ds[split].select_columns(kept).add_column("logits", logits.tolist()).to_parquet(f"{outputdir}/predictions_{split}{suffix}.parquet")
     with open(f"{outputdir}/test_metrics{suffix}.json", "w") as fh:
         json.dump({"run": run_name, "dataset": {"config": args.dataset_config, "revision": getattr(args, "dataset_revision", None)},
-                   "audience": args.audience, "voter_record": args.voter_record,
+                   "split": args.split, "audience": args.audience, "voter_record": args.voter_record,
                    "shuffled_audience": args.shuffle_audience, "seed": args.seed,
                    "model": (args.eval_only or model_repo) if evaluate_only else MODEL_NAME, "max_length": max_length,
                    "metrics": metrics, "per_class": per_class}, fh, indent=2)

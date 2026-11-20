@@ -48,6 +48,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.splits import SPLIT_KINDS, temporal_columns  # noqa: E402
 from common.voter_record import record_counts  # noqa: E402
 
 SPLITS = ("train", "validation", "test")
@@ -58,7 +59,7 @@ C_GRID = (0.001, 0.01, 0.1, 1.0, 10.0)
 SEED = 42
 METRIC_TITLES = {"auroc": "AUROC", "macro_f1": "macro-F1", "accuracy": "accuracy"}
 
-Rows = Dict[str, List[Any]]  # one split as columns: debate_id, voter, before, year, label
+Rows = Dict[str, List[Any]]  # one split as columns: debate_id, voter, before, year, label (and extra ones asked for)
 Matrices = Tuple[csr_matrix, csr_matrix, csr_matrix]  # train, validation, test
 Metric = Callable[[np.ndarray, np.ndarray], float]  # (labels, model output) -> value
 
@@ -77,24 +78,31 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--dataset-config", default="ddo_switch",
                     help="T2 config: ddo_switch or ddo_undecided (default: %(default)s)")
     ap.add_argument("--dataset-revision", default="main", help="branch of the dataset repo (default: %(default)s)")
+    ap.add_argument("--split", choices=SPLIT_KINDS, default="random",
+                    help="random = the split stored on the Hub; temporal = train on debates through 2015, test on "
+                         "later ones, as scripts/train_delta.py --split temporal (default: %(default)s)")
     ap.add_argument("--bootstrap", type=int, default=1000, help="bootstrap resamples of the test debates")
     ap.add_argument("--output", help="write the results as JSON to this path")
     return ap.parse_args()
 
 
-def load_rows(repo: str, config: str, revision: str) -> Tuple[Dict[str, Rows], List[str]]:
-    """Id and label columns of every split, plus the label names. Streams, so the transcripts stay on the Hub."""
-    ds = load_dataset(repo, config, revision=revision, columns=COLUMNS, streaming=True,
+def load_rows(repo: str, config: str, revision: str, extra: Sequence[str] = (),
+              split: str = "random") -> Tuple[Dict[str, Rows], List[str]]:
+    """Id and label columns of every split (and any `extra` columns), plus the label names. Streams, so the
+    transcripts stay on the Hub. With split "temporal" the rows are re-split by time, as
+    scripts/train_delta.py --split temporal does (scripts/common/splits.py)."""
+    wanted = COLUMNS + [c for c in extra if c not in COLUMNS]
+    ds = load_dataset(repo, config, revision=revision, columns=wanted, streaming=True,
                       token=os.environ.get("HF_TOKEN"))
     names = ds["train"].features["label"].names
     splits = {}
-    for split in SPLITS:
-        columns: Rows = {c: [] for c in COLUMNS}
-        for row in ds[split]:
-            for c in COLUMNS:
+    for name in SPLITS:
+        columns: Rows = {c: [] for c in wanted}
+        for row in ds[name]:
+            for c in wanted:
                 columns[c].append(row[c])
-        splits[split] = columns
-    return splits, names
+        splits[name] = columns
+    return (temporal_columns(splits) if split == "temporal" else splits), names
 
 
 def load_profiles(path: str, voters: set) -> Dict[str, Dict[str, str]]:
@@ -297,7 +305,7 @@ def print_table(results: Dict[str, Dict[str, Any]], metrics: Sequence[str], labe
 
 def main() -> None:
     args = parse_args()
-    splits, label_names = load_rows(args.dataset_repo, args.dataset_config, args.dataset_revision)
+    splits, label_names = load_rows(args.dataset_repo, args.dataset_config, args.dataset_revision, split=args.split)
     n_classes = len(label_names)
     scoring = scoring_for(n_classes)
     y = {s: np.array(rows["label"]) for s, rows in splits.items()}
@@ -363,7 +371,8 @@ def main() -> None:
     if args.output:
         os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
         with open(args.output, "w") as fh:
-            json.dump({"dataset": {"repo": args.dataset_repo, "config": args.dataset_config, "revision": args.dataset_revision},
+            json.dump({"dataset": {"repo": args.dataset_repo, "config": args.dataset_config, "revision": args.dataset_revision,
+                                   "split": args.split},
                        "label_names": label_names, "coverage": coverage, "bootstrap_resamples": args.bootstrap,
                        "models": results}, fh, indent=2)
         print(f"\nWrote {args.output}")
