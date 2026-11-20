@@ -59,9 +59,9 @@ from scipy.sparse import hstack
 from scipy.stats import rankdata
 from sklearn.linear_model import LogisticRegression
 
-from listener_baseline import (METRIC_TITLES, SEED, Matrices, Metric, Rows, class_f1, confusion, constant_prediction,
-                               context_features, evaluate, fit_best, load_profiles, load_rows, model_rows,
-                               profile_features, record_features, same_debate_pairs, scoring_for)
+from listener_baseline import (METRIC_TITLES, SEED, SPLIT_KINDS, Matrices, Metric, Rows, class_f1, confusion,
+                               constant_prediction, context_features, evaluate, fit_best, load_profiles, load_rows,
+                               model_rows, profile_features, record_features, same_debate_pairs, scoring_for)
 
 # Two classes: listener models that a text model is combined with: row name -> (short name, feature groups
 # of the baseline).
@@ -94,6 +94,9 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--dataset-repo", default="nlp-final-project11/persuasion-datasets")
     ap.add_argument("--dataset-config", default="ddo_switch", help="T2 config: ddo_switch or ddo_undecided (default: %(default)s)")
     ap.add_argument("--dataset-revision", default="main", help="branch of the dataset repo (default: %(default)s)")
+    ap.add_argument("--split", choices=SPLIT_KINDS, default="random",
+                    help="the split the models were trained on: random = the one stored on the Hub; temporal = "
+                         "train on debates through 2015, test on later ones (default: %(default)s)")
     ap.add_argument("--bootstrap", type=int, default=1000, help="bootstrap resamples of the test debates")
     ap.add_argument("--permutations", type=int, default=2000, help="permutations per paired test")
     ap.add_argument("--output", help="write the results as JSON to this path")
@@ -356,7 +359,7 @@ def main() -> None:
     args = parse_args()
     model_folders, control_files = named(args.model, "model"), named(args.test_scores, "test-scores")
     splits, label_names = load_rows(args.dataset_repo, args.dataset_config, args.dataset_revision,
-                                    extra=[args.subset] if args.subset else [])
+                                    extra=[args.subset] if args.subset else [], split=args.split)
     n_classes = len(label_names)
     main_metric = next(iter(scoring_for(n_classes).metrics))
     measure = scoring_for(n_classes).metrics[main_metric]
@@ -418,7 +421,8 @@ def main() -> None:
     rows = {name: {"seeds": r.pop("seeds"), f"validation_{main_metric}": validation_value[name], **r,
                    **({"weights": weights[name]} if name in weights else {})} for name, r in rows.items()}
     print_results(rows, results, f"{len(y['test'])} rows", n_pairs, label_names)
-    out = {"dataset": {"repo": args.dataset_repo, "config": args.dataset_config, "revision": args.dataset_revision},
+    out = {"dataset": {"repo": args.dataset_repo, "config": args.dataset_config, "revision": args.dataset_revision,
+                       "split": args.split},
            "label_names": label_names, "metric": main_metric,
            "models": model_folders, "test_scores": control_files,
            "bootstrap_resamples": args.bootstrap, "permutations": args.permutations,

@@ -41,27 +41,34 @@ shift || true
 # A text + audience run (--audience <source>) has its own outputs and markers, named as in
 # scripts/train_delta.py: outputs/<config>-audience-<source>/. A run with the voter's voting record
 # (--voter-record <kind>) has -record-<kind> after that, and a run with another seed than 42
-# (--seed <N>) has -seed<N> at the end. An --eval-only run scores a finished
+# (--seed <N>) has -seed<N> at the end. A run on the temporal split (--split temporal) has -temporal
+# right after the config. An --eval-only run scores a finished
 # model, so like a smoke run it neither checks nor sets the markers.
 #   sbatch -A <account> jobs/train.sub ddo_switch --audience self --bf16 --push
 #   sbatch -A <account> jobs/train.sub ddo_switch --audience self --seed 43 --bf16 --push
 #   sbatch -A <account> jobs/train.sub ddo_switch --voter-record all --bf16 --push
+#   sbatch -A <account> jobs/train.sub ddo_switch --split temporal --audience self --bf16 --push
 #   sbatch -A <account> jobs/train.sub ddo_switch --eval-only --bf16
 # Names starting with t3_ are not dataset configs of scripts/train_delta.py: the T3 scripts write to one
 # fixed folder whatever their seed, so they get no suffix here.
 RUN=$CONFIG
+SPLIT_SUFFIX=
+AUDIENCE_SUFFIX=
 RECORD_SUFFIX=
 SEED_SUFFIX=
 previous=
 for arg in "$@"; do
-    for option in --audience --voter-record --seed; do
+    for option in --split --audience --voter-record --seed; do
         if [[ $arg == $option=* ]]; then
             previous=$option
             arg=${arg#$option=}
         fi
     done
+    if [[ $previous == --split && $arg != random && $CONFIG != t3_* ]]; then
+        SPLIT_SUFFIX=-$arg
+    fi
     if [[ $previous == --audience && $arg != none ]]; then
-        RUN=$CONFIG-audience-$arg
+        AUDIENCE_SUFFIX=-audience-$arg
     fi
     if [[ $previous == --voter-record && $arg != none && $CONFIG != t3_* ]]; then
         RECORD_SUFFIX=-record-$arg
@@ -71,7 +78,7 @@ for arg in "$@"; do
     fi
     previous=$arg
 done
-RUN=$RUN$RECORD_SUFFIX$SEED_SUFFIX
+RUN=$CONFIG$SPLIT_SUFFIX$AUDIENCE_SUFFIX$RECORD_SUFFIX$SEED_SUFFIX
 DONE=outputs/$RUN/DONE
 FAILED=outputs/$RUN/FAILED
 SMOKE=false
