@@ -225,5 +225,8 @@ the script per seed, the last column from the run over all three seeds:
   another seed gives different ones; no `--seed` equals `--seed 42`; `jobs/train.sub` and the script
   derive the same run name in 13 argument forms. The T3 scripts write to one fixed folder whatever
   their seed, so `jobs/train.sub` gives names starting with `t3_` no seed suffix.
-- **Two-class configs only.** `ddo_undecided` has three classes and no single score per row.
+- **Three-class configs** (`ddo_undecided`) have no single score per row. Since
+  `analysis/2026-11-19_t2-undecided-audience/` the script compares their predicted classes on macro-F1
+  instead and fits no combination. Everything on this page is about `ddo_switch` and is unchanged by
+  that.
 - **The prediction files hold voter names.** They stay in `outputs/`, which git ignores.

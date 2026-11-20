@@ -58,7 +58,7 @@ C_GRID = (0.001, 0.01, 0.1, 1.0, 10.0)
 SEED = 42
 METRIC_TITLES = {"auroc": "AUROC", "macro_f1": "macro-F1", "accuracy": "accuracy"}
 
-Rows = Dict[str, List[Any]]  # one split as columns: debate_id, voter, before, year, label
+Rows = Dict[str, List[Any]]  # one split as columns: debate_id, voter, before, year, label (and extra ones asked for)
 Matrices = Tuple[csr_matrix, csr_matrix, csr_matrix]  # train, validation, test
 Metric = Callable[[np.ndarray, np.ndarray], float]  # (labels, model output) -> value
 
@@ -82,16 +82,18 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-def load_rows(repo: str, config: str, revision: str) -> Tuple[Dict[str, Rows], List[str]]:
-    """Id and label columns of every split, plus the label names. Streams, so the transcripts stay on the Hub."""
-    ds = load_dataset(repo, config, revision=revision, columns=COLUMNS, streaming=True,
+def load_rows(repo: str, config: str, revision: str, extra: Sequence[str] = ()) -> Tuple[Dict[str, Rows], List[str]]:
+    """Id and label columns of every split (and any `extra` columns), plus the label names. Streams, so the
+    transcripts stay on the Hub."""
+    wanted = COLUMNS + [c for c in extra if c not in COLUMNS]
+    ds = load_dataset(repo, config, revision=revision, columns=wanted, streaming=True,
                       token=os.environ.get("HF_TOKEN"))
     names = ds["train"].features["label"].names
     splits = {}
     for split in SPLITS:
-        columns: Rows = {c: [] for c in COLUMNS}
+        columns: Rows = {c: [] for c in wanted}
         for row in ds[split]:
-            for c in COLUMNS:
+            for c in wanted:
                 columns[c].append(row[c])
         splits[split] = columns
     return splits, names
