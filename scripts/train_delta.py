@@ -44,6 +44,10 @@ def parse_args():
     ap.add_argument("--smoke", action="store_true", help="tiny/fast pipeline check")
     ap.add_argument("--bf16", action="store_true", help="train with bf16 mixed precision (default: fp32, as the T1 baseline)")
     ap.add_argument("--freeze", action="store_true", help="freeze the encoder, train only the classifier head (cheap, lower accuracy)")
+    ap.add_argument("--max-length", type=int, default=MAX_LENGTH,
+                    help="tokens read per input; a longer debate is cut at its end (default: %(default)s; "
+                         "ModernBERT reads up to 8192). A run with another limit has -len<N> in its name, "
+                         "before the seed")
     ap.add_argument("--seed", type=int, default=DEFAULT_SEED,
                     help="training seed: the classifier's start weights and the order of the training rows "
                          "(default: %(default)s). A run with another seed gets -seed<N> at the end of its name: "
@@ -142,7 +146,7 @@ def main():
     max_steps  = 4   if args.smoke else -1
     batch_size = 1   if args.smoke else BATCH_SIZE
     grad_accum = 1   if args.smoke else GRAD_ACCUM
-    max_length = 256 if args.smoke else MAX_LENGTH
+    max_length = 256 if args.smoke else args.max_length
     save_steps = 2   if args.smoke else SAVE_STEPS
 
     ds = load_dataset(DATASET_REPO, args.dataset_config, revision=args.dataset_revision, token=HF_TOKEN).rename_column("label", "labels")
@@ -154,11 +158,12 @@ def main():
         ds = add_profiles(ds, args.audience, args.shuffle_audience, revision=args.audience_revision)
     if args.voter_record != "none":  # after the profile, so the input is: resolution, side before, profile, record, debate
         ds = add_records(ds, args.voter_record, shuffle=args.shuffle_audience)
-    # a run with another split, a profile, a voting record or another seed keeps its own outputs and
-    # model repo; jobs/train.sub derives the same name
+    # a run with another split, a profile, a voting record, another token limit or another seed keeps
+    # its own outputs and model repo; jobs/train.sub derives the same name
     run_name = (args.dataset_config + ("" if args.split == "random" else f"-{args.split}")
                 + ("" if args.audience == "none" else f"-audience-{args.audience}")
                 + ("" if args.voter_record == "none" else f"-record-{args.voter_record}")
+                + ("" if args.max_length == MAX_LENGTH else f"-len{args.max_length}")
                 + ("" if args.seed == DEFAULT_SEED else f"-seed{args.seed}"))
     model_repo = f"{MODEL_REPO}-{run_name}"
     evaluate_only = args.eval_only is not None

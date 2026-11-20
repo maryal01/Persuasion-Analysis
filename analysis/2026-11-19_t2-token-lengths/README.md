@@ -3,7 +3,7 @@
 **Status:** measured on 2026-11-19. The T2 runs read at most 4,096 tokens per vote. For a third of the
 `ddo_switch` votes and a fifth of the `ddo_undecided` votes the input is longer, so the end of the
 debate is cut. At 8,192 tokens, which ModernBERT can read, it would be about one vote in nine and one
-in thirteen. No run at 8,192 exists.
+in thirteen. One run at 8,192 tokens is prepared (`--max-length 8192`) and not finished.
 
 ## Goal
 
@@ -21,10 +21,23 @@ and the voter's side before the debate, the debate, and the three special tokens
   `scripts/create_dataset.py`, the code that built the Hub configs. Each of the 45,141 debates is
   tokenized once with the ModernBERT tokenizer.
 
+- **`--max-length <N>`** in `scripts/train_delta.py` sets the limit for a run (default 4,096). A run
+  with another limit has `-len<N>` in its name, before the seed, for example
+  `ddo_switch-audience-self-len8192`, with its own `outputs/` folder, markers and model repo.
+  `jobs/train.sub` derives the same name. A smoke run keeps its short inputs.
+
 ## Run
 
 ```bash
 python scripts/t1_t2/token_lengths.py --debates ddo/debates.json --output outputs/token_lengths.json
+# the proposal's model, reading up to 8,192 tokens; add --smoke first for a quick check
+sbatch -A <account> jobs/train.sub ddo_switch --audience self --max-length 8192 --bf16 --push
+# afterwards, with its prediction files copied to outputs/<run>/
+python scripts/t1_t2/compare_models.py --users ddo/users.json \
+    --model "Text + audience=outputs/ddo_switch-audience-self,outputs/ddo_switch-audience-self-seed43,outputs/ddo_switch-audience-self-seed44" \
+    --test-scores "Text + audience, 8,192 tokens=outputs/ddo_switch-audience-self-len8192/predictions_test.parquet" \
+    --compare "Text + audience, 8,192 tokens" "Text + audience" \
+    --output outputs/compare_models_len8192.json
 ```
 
 ## Results
@@ -49,8 +62,17 @@ Tokens per vote, and the share of votes whose input is longer than each limit:
 
 ## Notes
 
-- **Whether this costs accuracy is not measured.** There is no run at 8,192 tokens. Such a run needs
-  an option for the limit in `scripts/train_delta.py`, more memory and more time per step.
+- **Whether this costs accuracy is not measured yet.** One run is planned: text + audience on
+  `ddo_switch`, seed 42, at 8,192 tokens. If its score equals that of the runs at 4,096 (0.744 ± 0.006
+  over three seeds), the shorter limit is justified; one seed cannot show a small gain.
+- **Cost of that run, estimated, not measured.** The runs at 4,096 tokens peaked at 14.9 GiB of GPU
+  memory with a batch of four; four times that still fits an 80 GB A100. A step should take about
+  twice as long, and a 4-hour job then saves fewer checkpoints, so the run needs about five chained
+  jobs instead of two.
+- **`--max-length`, checked on made-up rows:** a higher limit changes the scores of debates that were
+  cut; the default written out gives the plain name and identical scores; `--eval-only` reproduces
+  the run; `jobs/train.sub` and the script derive the same run name in 12 argument forms. Runs without
+  the option give exactly the same scores as before (14 files, difference 0).
 - **The numbers are per vote, not per debate.** A debate with many voters counts once per voter.
 - **The profile line adds 35 tokens** in a text + audience run (6 for a voter without a profile); it
   is not included above.
