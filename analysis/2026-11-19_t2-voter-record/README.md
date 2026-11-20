@@ -1,8 +1,10 @@
 # T2: the voter's voting record in the model input
 
-**Status:** three models trained on Gilbreth on 2026-11-19 (`ddo_switch`, one seed each). One model
-that reads the debate and the voter's voting record scores AUROC 0.838, the same as the text-only model
-and the record combined after training (0.836). Adding the profile as well changes nothing (0.831).
+**Status:** three models trained on Gilbreth on 2026-11-19 (`ddo_switch`, seed 42), and the first of
+them again with seeds 43 and 44. One model that reads the debate and the voter's voting record scores
+AUROC 0.838 with seed 42 and 0.830 ± 0.012 over three seeds, the same as the text-only model and the
+record combined after training (0.836; 0.833 ± 0.004). Adding the profile as well changes nothing
+(0.831, one seed).
 
 ## Goal
 
@@ -46,10 +48,27 @@ sbatch -A <account> jobs/train.sub ddo_switch --voter-record earlier --bf16 --pu
 sbatch -A <account> jobs/train.sub ddo_switch --audience self --voter-record all --bf16 --push
 # control: the same model, records swapped between voters
 sbatch -A <account> jobs/train.sub ddo_switch --voter-record all --eval-only --shuffle-audience --bf16
+# two more seeds of the text + voting record model
+sbatch -A <account> jobs/train.sub ddo_switch --voter-record all --seed 43 --bf16 --push
+sbatch -A <account> jobs/train.sub ddo_switch --voter-record all --seed 44 --bf16 --push
 ```
 
 Each training run should take about as long as the text-only run (about 7 hours in two or three
 chained standby jobs); the added line is short. Not measured.
+
+The comparison over the three seeds (see "Three seeds" under Results), with the prediction files of
+each run copied to `outputs/<run>/`:
+
+```bash
+python scripts/t1_t2/compare_models.py --users ddo/users.json \
+    --model "Text only=outputs/ddo_switch,outputs/ddo_switch-seed43,outputs/ddo_switch-seed44" \
+    --model "Text + audience=outputs/ddo_switch-audience-self,outputs/ddo_switch-audience-self-seed43,outputs/ddo_switch-audience-self-seed44" \
+    --test-scores "One model: text + record=outputs/ddo_switch-record-all/predictions_test.parquet,outputs/ddo_switch-record-all-seed43/predictions_test.parquet,outputs/ddo_switch-record-all-seed44/predictions_test.parquet" \
+    --compare "One model: text + record" "Text only + voting record" \
+    --compare "One model: text + record" "Listener: voting record" \
+    --compare "One model: text + record" "Text only" \
+    --output outputs/compare_models_all_seeds.json
+```
 
 ## Results
 
@@ -87,11 +106,45 @@ most 4,096 tokens, `--bf16`). Intervals are 95%, from a bootstrap over debates; 
 - **The profile adds nothing on top of the record** (0.831 with it, 0.838 without; not a clear
   difference). The listener baseline and the combinations showed the same.
 - **Counting only earlier years, one model scores 0.767,** against 0.674 for that record alone.
-- **One seed.** The three-seed runs of the other two models moved by up to 0.02 between seeds
-  (`analysis/2026-11-19_t2-compare-models/`), so differences of that size between rows here mean
-  little.
+- **One seed in the tables above.** The text + record model has three seeds (see "Three seeds" below)
+  and moved by up to 0.02 between them, as the text-only model did
+  (`analysis/2026-11-19_t2-compare-models/`). The model with earlier years only and the model with
+  profile and record have seed 42 only, so differences of that size between their rows mean little.
 - Models: `nlp-final-project11/nlp-project-modernbert-ddo_switch-record-all`, `-record-earlier` and
   `-ddo_switch-audience-self-record-all` (private). The Slurm job ids and durations are not copied here.
+
+### Three seeds
+
+The text + record model (`--voter-record all`) was trained again with seeds 43 and 44 (`--seed`, same
+settings; model repos `nlp-project-modernbert-ddo_switch-record-all-seed43` and `-seed44`, private).
+Test AUROC; the interval is the 95% interval of the three-seed average. The listener row does not
+depend on the seed. The other rows are those of `analysis/2026-11-19_t2-compare-models/`, repeated
+for comparison.
+
+| Row | Seed 42 | Seed 43 | Seed 44 | Mean ± std | 95% interval | Same-debate pairs |
+|---|---|---|---|---|---|---|
+| Text only | 0.719 | 0.697 | 0.709 | 0.708 ± 0.011 | 0.679–0.736 | 48.7% |
+| Listener: voting record, no text | 0.790 | 0.790 | 0.790 | 0.790 | 0.765–0.813 | 78.3% |
+| Text only + voting record, combined after training | 0.836 | 0.829 | 0.834 | 0.833 ± 0.004 | 0.808–0.854 | 78.3% |
+| **One model: text + voting record** | 0.838 | 0.816 | 0.836 | **0.830 ± 0.012** | 0.809–0.850 | 77.1% |
+
+Paired comparisons over the three seeds together (first minus second; a row with three seeds is
+compared seed by seed, the listener row with each seed):
+
+| Comparison | AUROC difference | 95% interval | p |
+|---|---|---|---|
+| One model: text + record − Text only | +0.122 | +0.099 to +0.145 | 0.0005 |
+| One model: text + record − Listener: voting record | +0.040 | +0.022 to +0.060 | 0.0005 |
+| One model: text + record − Text only + voting record, combined after training | −0.003 | −0.012 to +0.008 | 0.61 |
+
+- **Over three seeds one model scores 0.830.** Seeds 42 and 44 are close (0.838, 0.836) and seed 43 is
+  lower (0.816). The seed-42 number in the table above is the highest of the three.
+- **The conclusions of the seed-42 run hold.** One model is clearly above the text-only model (+0.122)
+  and above the record alone (+0.040), and it equals the two combined after training (−0.003; the
+  interval includes 0).
+- **The combination is steadier between seeds** (standard deviation 0.004 against 0.012 for one
+  model). In the combination only the text score changes with the seed and the record carries most of
+  the weight. With three seeds each, these standard deviations are rough.
 
 Measured without a model, on the real `ddo_switch` rows:
 
@@ -129,6 +182,7 @@ training rows.
   `--voter-record` trains and saves; `--eval-only` reproduces its test scores; with
   `--shuffle-audience` the scores change on exactly the rows whose line changed; `jobs/train.sub` and
   the script derive the same run name in 10 argument forms.
-- **Not run:** the swapped-record control for the trained models, and seeds other than 42.
+- **Not run:** the swapped-record control for the trained models, and seeds other than 42 for the
+  model with earlier years only and for the model with profile and record.
 - **`ddo_undecided`** works the same way (the line then lists `tie`, `pro` and `con`); nothing is
   measured for it here.
