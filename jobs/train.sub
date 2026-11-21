@@ -51,6 +51,8 @@ shift || true
 #   sbatch -A <account> jobs/train.sub ddo_switch --split temporal --audience self --bf16 --push
 #   sbatch -A <account> jobs/train.sub ddo_switch --audience self --max-length 8192 --bf16 --push
 #   sbatch -A <account> jobs/train.sub ddo_switch --eval-only --bf16
+#   sbatch -A <account> jobs/train.sub ddo_common --dataset-revision rq2 --init-from outputs/cmv_common --bf16
+#   sbatch -A <account> jobs/train.sub ddo_common --dataset-revision rq2 --eval-only outputs/cmv_common --tag by-cmv_common --bf16
 # Names starting with t3_ are not dataset configs of scripts/train_delta.py: the T3 scripts write to one
 # fixed folder whatever their seed, so they get no suffix here.
 RUN=$CONFIG
@@ -58,10 +60,12 @@ SPLIT_SUFFIX=
 AUDIENCE_SUFFIX=
 RECORD_SUFFIX=
 LENGTH_SUFFIX=
+INIT_SUFFIX=
+TAG_SUFFIX=
 SEED_SUFFIX=
 previous=
 for arg in "$@"; do
-    for option in --split --audience --voter-record --max-length --seed; do
+    for option in --split --audience --voter-record --max-length --init-from --tag --seed; do
         if [[ $arg == $option=* ]]; then
             previous=$option
             arg=${arg#$option=}
@@ -79,12 +83,21 @@ for arg in "$@"; do
     if [[ $previous == --max-length && $arg != 4096 && $CONFIG != t3_* ]]; then
         LENGTH_SUFFIX=-len$arg
     fi
+    if [[ $previous == --init-from && $CONFIG != t3_* ]]; then
+        # the last part of the model's path or repo, without the prefix of this project's model repos
+        INIT_NAME=${arg%/}
+        INIT_NAME=${INIT_NAME##*/}
+        INIT_SUFFIX=-init-${INIT_NAME#nlp-project-modernbert-}
+    fi
+    if [[ $previous == --tag && $CONFIG != t3_* ]]; then
+        TAG_SUFFIX=-$arg
+    fi
     if [[ $previous == --seed && $arg != 42 && $CONFIG != t3_* ]]; then
         SEED_SUFFIX=-seed$arg
     fi
     previous=$arg
 done
-RUN=$CONFIG$SPLIT_SUFFIX$AUDIENCE_SUFFIX$RECORD_SUFFIX$LENGTH_SUFFIX$SEED_SUFFIX
+RUN=$CONFIG$SPLIT_SUFFIX$AUDIENCE_SUFFIX$RECORD_SUFFIX$LENGTH_SUFFIX$INIT_SUFFIX$TAG_SUFFIX$SEED_SUFFIX
 DONE=outputs/$RUN/DONE
 FAILED=outputs/$RUN/FAILED
 SMOKE=false
