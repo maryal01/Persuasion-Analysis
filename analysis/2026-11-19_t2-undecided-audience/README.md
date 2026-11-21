@@ -1,10 +1,11 @@
 # T2: text + audience for `ddo_undecided`, and the comparison for three classes
 
-**Status:** prepared on 2026-11-19. The comparison script now handles three-class configs and is
-checked on made-up scores. The Gilbreth runs for `ddo_undecided` (text + audience, its swapped-profile
-control and a re-score of the text-only model) were not finished when this was written, so that task
-has no results yet. One result is in: on `ddo_switch`, the voters who filled in the other criteria
-(98.2% of the test votes) give the same picture as all voters.
+**Status:** run on Gilbreth and compared on 2026-11-20, three seeds per model. On `ddo_undecided` the
+profile in front of the debate brings no clear gain: test macro-F1 is 0.380 with it and 0.374 without
+(difference +0.006, 95% interval −0.002 to +0.014, p = 0.15). Neither model is above logistic
+regression on the year of the debate (0.382). The model does read the profile: with the profiles
+swapped between voters its macro-F1 drops by 0.011 (p = 0.0035, one seed). On the voters who filled in
+the other criteria the picture is the same, for `ddo_undecided` and for `ddo_switch`.
 
 ## Goal
 
@@ -50,18 +51,25 @@ promises around it:
 On Gilbreth (a smoke run first; the training run needs two or three chained standby jobs):
 
 ```bash
-# text + audience; add --smoke first for a quick check
-sbatch -A <account> jobs/train.sub ddo_undecided --audience self --bf16 --push
+# text + audience; add --smoke first for a quick check, and --seed 43 / --seed 44 for the other seeds
+sbatch -A <account> jobs/train.sub ddo_undecided --audience self --bf16
 # control, after training: the same model, profiles swapped between voters
-sbatch -A <account> jobs/train.sub ddo_undecided --audience self --eval-only --shuffle-audience --bf16
+sbatch -A <account> jobs/train.sub ddo_undecided --audience self \
+    --eval-only outputs/ddo_undecided-audience-self --shuffle-audience --bf16
 # the text-only model of RESULTS.md scored again, to save its score per vote
 sbatch -A <account> jobs/train.sub ddo_undecided --eval-only --bf16
+# the text-only model with the other seeds
+sbatch -A <account> jobs/train.sub ddo_undecided --seed 43 --bf16
 ```
 
-Then, with the `predictions_*.parquet` files of both runs copied to `outputs/<run>/` (sandbox off; the
+These runs were made without `--push`, so their models are in `outputs/<run>/` on Gilbreth and not on
+the Hub (see Notes). With `--push`, `--eval-only` needs no folder: it reads the model from the Hub.
+
+Then, with the `predictions_*.parquet` files of the runs copied to `outputs/<run>/` (sandbox off; the
 script streams ids and labels from the Hub and reads `ddo/users.json`):
 
 ```bash
+# seed 42, with the swapped-profile control
 python scripts/t1_t2/compare_models.py --users ddo/users.json --dataset-config ddo_undecided \
     --model "Text only=outputs/ddo_undecided" \
     --model "Text + audience=outputs/ddo_undecided-audience-self" \
@@ -72,6 +80,15 @@ python scripts/t1_t2/compare_models.py --users ddo/users.json --dataset-config d
     --compare "Text + audience" "Always tie" \
     --subset filled_other_criteria \
     --output outputs/compare_models_undecided.json
+# three seeds
+python scripts/t1_t2/compare_models.py --users ddo/users.json --dataset-config ddo_undecided \
+    --model "Text only=outputs/ddo_undecided,outputs/ddo_undecided-seed43,outputs/ddo_undecided-seed44" \
+    --model "Text + audience=outputs/ddo_undecided-audience-self,outputs/ddo_undecided-audience-self-seed43,outputs/ddo_undecided-audience-self-seed44" \
+    --compare "Text + audience" "Listener: profile" \
+    --compare "Text + audience" "Listener: year" \
+    --compare "Text + audience" "Always tie" \
+    --subset filled_other_criteria \
+    --output outputs/compare_models_undecided_seeds.json
 ```
 
 The `ddo_switch` rerun on the subset is the three-seed command of
@@ -108,31 +125,99 @@ the average. The listener row does not depend on the seed.
 
 ### `ddo_undecided`
 
-None yet. What the new model will be set against, on the same 7,091 test votes (6,508 `tie`, 256 `pro`,
-327 `con`):
+Both models with seeds 42, 43 and 44 (3 epochs, at most 4,096 tokens, `--bf16`, class weights). The
+text-only model with seed 42 is the one of `RESULTS.md`, scored again; the other five runs finished
+on 2026-11-20. The test split has 7,091 votes: 6,508 `tie`, 256 `pro`, 327 `con`. A model row is the
+average over its three seeds, ± the standard deviation between them, with the 95% interval of the
+average. The rows without text do not depend on the seed.
 
-| Row | Test macro-F1 | Test accuracy | Source |
+| Row | Test macro-F1 | 95% interval | Per seed | Accuracy | F1 `tie` | F1 `pro` | F1 `con` |
+|---|---|---|---|---|---|---|---|
+| Always `tie` | 0.319 | 0.318–0.320 | | 0.918 | 0.957 | 0.000 | 0.000 |
+| Listener: profile (the proposal's profile-only baseline) | 0.342 | 0.330–0.353 | | 0.584 | 0.741 | 0.116 | 0.168 |
+| Listener: year | 0.382 | 0.367–0.398 | | 0.788 | 0.887 | 0.118 | 0.141 |
+| Text only | 0.374 ± 0.019 | 0.360–0.389 | 0.359, 0.368, 0.395 | 0.715 | 0.832 | 0.134 | 0.157 |
+| Text + audience (the proposal's model) | 0.380 ± 0.017 | 0.364–0.396 | 0.363, 0.382, 0.396 | 0.743 | 0.852 | 0.137 | 0.151 |
+| Listener: voting record, no text (extension) | 0.423 | 0.408–0.439 | | 0.748 | 0.867 | 0.191 | 0.213 |
+
+| Comparison (first minus second) | Macro-F1 difference | 95% interval | p |
 |---|---|---|---|
-| Always `tie` | 0.319 | 0.918 | listener baseline; reproduced by this script |
-| Listener: year | 0.382 | 0.788 | same |
-| Listener: profile | 0.342 | 0.584 | same |
-| Listener: voting record (extension) | 0.423 | 0.748 | same |
-| ModernBERT-base, text only | 0.360 | 0.644 | `RESULTS.md` on branch `t2-ddo-switch-results`; its scores per vote are not saved yet |
+| Text + audience − Text only | +0.006 | −0.002 to +0.014 | 0.15 |
+| Text + audience − Listener: profile | +0.038 | +0.021 to +0.054 | 0.0005 |
+| Text + audience − Listener: year | −0.002 | −0.023 to +0.017 | 0.84 |
+| Text + audience − Always `tie` | +0.061 | +0.045 to +0.078 | 0.0005 |
+| Seed 42 only: Text + audience − the same model with swapped profiles | +0.011 | +0.003 to +0.018 | 0.0035 |
 
-The subset: `filled_other_criteria` is true for 6,741 of the 7,091 test votes (95.1%), from 3,536 of
-the 3,649 test debates: 6,169 `tie`, 252 `pro`, 320 `con`. The rerun therefore leaves out one vote in
-twenty, almost all of them `tie`.
+- **The profile brings no clear gain on this task.** With it the macro-F1 is 0.006 higher, the
+  interval includes 0 and p = 0.15. Per seed the gain is +0.003, +0.014 and +0.001. On `ddo_switch`
+  the same change gave +0.036 AUROC (p = 0.0005).
+- **The model reads the profile all the same.** With the profiles swapped between voters, the seed-42
+  model falls from 0.363 to 0.351. So the profile changes its answers, but a model without any
+  profile does about as well.
+- **Neither text model is above the year of the debate.** Logistic regression on the year alone has
+  0.382; text + audience is 0.002 below it (p = 0.84) and text only has 0.374 (not tested against
+  it). `RESULTS.md` already said this for the text-only model with one seed; three seeds and the
+  profile do not change it.
+- **Both are above always answering `tie` and above the profile-only baseline.**
+- **The seeds differ more than the two models do.** Macro-F1 runs from 0.359 to 0.395 between seeds,
+  against a difference of 0.006 between the models. The seeds differ in how often they answer `tie`:
+  for 4,560, 4,780 and 6,222 of the 7,091 test votes (text only) and for 4,714, 5,271 and 6,302
+  (text + audience). Accuracy follows that: 0.644, 0.670, 0.833 and 0.661, 0.727, 0.841. Seed 44
+  answers `tie` most often and has the highest macro-F1 with both models.
+- **`pro` and `con` are found poorly by every model** (F1 0.12 to 0.21). The seed-42 text + audience
+  model finds 83 of the 256 `pro` votes and 135 of the 327 `con` votes, and answers `pro` or `con`
+  for 2,041 of the 6,508 votes that stayed tied.
+- **The best row uses no text (extension of the proposal).** Logistic regression on the voter's
+  voting record has 0.423; its interval lies above those of both text models. It was not compared
+  with them in a paired test, and no model with text and the voting record was trained for this task.
+- Seed 42 alone (`outputs/compare_models_undecided.json`): text only 0.359 (0.343–0.376),
+  text + audience 0.363 (0.347–0.378), difference +0.003 (−0.007 to +0.013, p = 0.55).
+
+#### The voters who filled in the other criteria
+
+`filled_other_criteria` is true for 6,741 of the 7,091 test votes (95.1%), from 3,536 of the 3,649
+test debates: 6,169 `tie`, 252 `pro`, 320 `con`. The rerun leaves out one vote in twenty, almost all
+of them `tie`. Test macro-F1, three seeds for the model rows:
+
+| Row | All test votes | Voters who filled in the other criteria |
+|---|---|---|
+| Always `tie` | 0.319 | 0.319 |
+| Listener: profile | 0.342 (0.330–0.353) | 0.345 (0.333–0.357) |
+| Listener: year | 0.382 (0.367–0.398) | 0.386 (0.368–0.401) |
+| Text only | 0.374 (0.360–0.389) | 0.378 (0.364–0.394) |
+| Text + audience | 0.380 (0.364–0.396) | 0.385 (0.370–0.401) |
+| Listener: voting record, no text (extension) | 0.423 (0.408–0.439) | 0.432 (0.415–0.449) |
+
+| Comparison on the subset (first minus second) | Macro-F1 difference | 95% interval | p |
+|---|---|---|---|
+| Text + audience − Text only | +0.007 | −0.002 to +0.015 | 0.095 |
+| Text + audience − Listener: profile | +0.040 | +0.023 to +0.057 | 0.0005 |
+| Text + audience − Listener: year | −0.001 | −0.021 to +0.019 | 0.95 |
+| Text + audience − Always `tie` | +0.067 | +0.050 to +0.083 | 0.0005 |
+| Seed 42 only: Text + audience − the same model with swapped profiles | +0.012 | +0.004 to +0.019 | 0.0030 |
+
+- **Nothing changes here either.** Every row moves by at most 0.009 on the subset and every
+  comparison keeps its sign and its reading. A tie that means "skipped" and not "undecided" is
+  therefore not what holds the scores down, as far as this column can tell: it marks 350 test votes,
+  339 of them `tie`.
 
 ## Notes
 
 - **The rerun is an evaluation, not a new training run.** The proposal says "we rerun T2 on voters who
   filled in the other criteria". Here the models trained on all voters are scored on those voters.
   Training on them only would be a separate run, which is not done here.
-- **One seed.** The run prepared here is seed 42. On `ddo_switch` the gain from the profile was clear
-  only over three seeds (`analysis/2026-11-19_t2-compare-models/`).
-- **The text-only model predates `--seed`,** so its classifier's start weights were not seeded. Its
-  re-score should reproduce the recorded 0.360 / 0.644; if it does not, the dataset or the model
-  changed since.
+- **Three seeds for both models; the swapped-profile control is seed 42 only.**
+- **The text-only model with seed 42 predates `--seed`,** so its classifier's start weights were not
+  seeded. Its re-score gives macro-F1 0.3595 and accuracy 0.6436, with validation macro-F1 0.345;
+  `RESULTS.md` records 0.360, 64.4% and 0.345. The macro-F1 differs by at most 0.001; whether any
+  vote is answered differently was not checked.
+- **Where the models are.** Only the text-only model with seed 42 is on the Hub
+  (`nlp-final-project11/nlp-project-modernbert-ddo_undecided`). The other five runs first ran with
+  `--push`; training finished, and the upload at the end failed because the org's private storage on
+  the Hub was full (a run with `--push` uploads the weights at every checkpoint). Started again
+  without `--push`, each run continued from its last checkpoint and wrote its scores. Their models
+  are in `outputs/<run>/` on Gilbreth scratch, which is purged after 60 days.
+- **Not copied from the job logs:** which checkpoint each run selected, and the run times.
 - **Profile coverage:** 82.0% / 81.5% / 81.7% of the train / validation / test rows have a voter with
   a known self-reported profile (`analysis/2026-11-17_t2-audience-input/`).
 - **Checked without a GPU,** on made-up rows with three classes: a run with `--audience self` trains and
