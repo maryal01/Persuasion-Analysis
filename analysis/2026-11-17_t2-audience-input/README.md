@@ -88,8 +88,10 @@ The rows named "same model" score the text + audience model again with other pro
   profiles often leave some out, so the form of the line changes as well as its content. And most
   predictions used here are for users the T3 model was trained on (the job log prints the share; it is
   not copied here).
-- **The `filled` model is not trained.** It would add predicted labels only where a voter reported
-  none, about a fifth of the rows.
+- **The `filled` model is not trained.** It adds a predicted label wherever a voter reported none.
+  That changes the profile line on 46% of the test rows, not only on the fifth without any profile,
+  because partly reported profiles are completed too. The run is prepared in
+  `analysis/2026-11-20_t2-audience-filled/`.
 - **It stays below the listener-only models.** Without any text, the voter's voting record gives 0.790
   and all listener features give 0.805 (`analysis/2026-11-16_t2-listener-baseline/`). The profile line
   holds the six stance labels only, not the voting record.
@@ -129,9 +131,10 @@ Coverage of the self-reported profiles, from `scripts/common/audience.py`:
   `ddo_switch` rows have a voter with text, so `filled` should leave about 4% of rows without any
   profile, against about 21% for `self` (measured on the issue labels during the dataset review).
 - **Predictions for users the T3 model was trained on are not a fair test of it.** The script prints the
-  share of rows that use such a label. For `filled` it is small by construction: a label is only
-  predicted where the voter reported none. For `inferred` it is most labelled voters, so compare `self`
-  and `inferred` on voters outside T3's training split.
+  share of rows that use such a label. For `filled` a label is only predicted where the voter reported
+  none, so the model never saw that label for the user; measured on 2026-11-20, 22.6% of the
+  `ddo_switch` test rows use such a label (voters with a partly reported profile). For `inferred` it is
+  most labelled voters, so compare `self` and `inferred` on voters outside T3's training split.
 - **Adding the new sources did not change the `self` input.** The profile lines of all 47,145 users are
   identical to the first version, so a run started before this change continues on the same input.
 - **Checked without a GPU,** on made-up rows: a run with `--audience self` trains and saves; `--eval-only`
