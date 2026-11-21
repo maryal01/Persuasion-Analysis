@@ -1,5 +1,6 @@
 import argparse
 import glob
+import json
 import os
 from collections import defaultdict
 
@@ -14,7 +15,12 @@ from transformers import (
     DataCollatorWithPadding,
     Trainer,
     TrainingArguments,
+    set_seed,
 )
+
+from common.audience import AUDIENCE_SOURCES, add_profiles
+from common.splits import SPLIT_KINDS, temporal_split
+from common.voter_record import RECORD_KINDS, add_records
 
 DATASET_REPO = "nlp-final-project11/persuasion-datasets"
 DATASET_REVISION = "t1-t2"  # Hub branch holding the T1/T2 configs built by scripts/create_dataset.py
@@ -26,6 +32,7 @@ GRAD_ACCUM = 8
 EPOCHS = 3
 LR = 2e-5
 SAVE_STEPS = 500  # eval + checkpoint interval; bounds the work lost when a job hits its time limit
+DEFAULT_SEED = 42  # the seed of the first runs; a run with this seed keeps the plain name <config>[-audience-<source>]
 
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
@@ -37,7 +44,40 @@ def parse_args():
     ap.add_argument("--smoke", action="store_true", help="tiny/fast pipeline check")
     ap.add_argument("--bf16", action="store_true", help="train with bf16 mixed precision (default: fp32, as the T1 baseline)")
     ap.add_argument("--freeze", action="store_true", help="freeze the encoder, train only the classifier head (cheap, lower accuracy)")
-    return ap.parse_args()
+    ap.add_argument("--max-length", type=int, default=MAX_LENGTH,
+                    help="tokens read per input; a longer debate is cut at its end (default: %(default)s; "
+                         "ModernBERT reads up to 8192). A run with another limit has -len<N> in its name, "
+                         "before the seed")
+    ap.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                    help="training seed: the classifier's start weights and the order of the training rows "
+                         "(default: %(default)s). A run with another seed gets -seed<N> at the end of its name: "
+                         "its own outputs/ folder and model repo")
+    ap.add_argument("--split", choices=SPLIT_KINDS, default="random",
+                    help="random = the split by debate that is stored on the Hub; temporal = train on debates "
+                         "through 2015 and test on later ones (DDO configs only; the proposal's robustness check, "
+                         "see scripts/common/splits.py). Such a run has -temporal after the config in its name "
+                         "(default: %(default)s)")
+    ap.add_argument("--audience", choices=AUDIENCE_SOURCES, default="none",
+                    help="write the voter's profile in front of the debate (DDO configs only): self = the labels the "
+                         "voter reported (ddo_users); inferred = the labels the T3 model predicted from their text "
+                         "(ddo_profiles_inferred); filled = reported where known, predicted otherwise. "
+                         "Such a run is named <config>-audience-<source> (default: %(default)s)")
+    ap.add_argument("--audience-revision", default="main",
+                    help="branch of the dataset repo that holds the profile tables (default: %(default)s)")
+    ap.add_argument("--eval-only", nargs="?", const="", metavar="MODEL",
+                    help="skip training and score the test split with a trained model: a path or a Hub repo; "
+                         "without a value, the repo this run pushes to")
+    ap.add_argument("--voter-record", choices=RECORD_KINDS, default="none",
+                    help="write the voter's voting record in front of the debate (DDO configs only): how often their "
+                         "votes in training debates ended in each class; all = every training debate except the "
+                         "row's own, earlier = only debates from earlier years. Not in the project proposal: an "
+                         "extension. Such a run has -record-<kind> in its name (default: %(default)s)")
+    ap.add_argument("--shuffle-audience", action="store_true",
+                    help="control, with --eval-only: every test voter gets another voter's profile and voting record")
+    args = ap.parse_args()
+    if args.shuffle_audience and (args.eval_only is None or (args.audience == "none" and args.voter_record == "none")):
+        ap.error("--shuffle-audience needs --eval-only and --audience or --voter-record")
+    return args
 
 def binary_auroc(scores, labels):
     """Chance a random positive outscores a random negative (ties count half); nan if a class is absent."""
@@ -48,19 +88,24 @@ def binary_auroc(scores, labels):
     ranks = (np.cumsum(counts) - (counts - 1) / 2)[inverse]  # 1-based ranks, averaged over ties
     return float((ranks[labels == 1].sum() - pos * (pos + 1) / 2) / (pos * neg))
 
-def compute_metrics(eval_pred):
-    logits, labels = eval_pred
-    logits, labels = np.asarray(logits), np.asarray(labels)
-    preds = logits.argmax(-1)
+def per_class_scores(preds, labels, n_classes):
+    """(precision, recall, F1) of every class; 0 where a class is never predicted or never present."""
     per_class = []
-    for c in range(logits.shape[1]):
+    for c in range(n_classes):
         tp = int(((preds == c) & (labels == c)).sum())
         fp = int(((preds == c) & (labels != c)).sum())
         fn = int(((preds != c) & (labels == c)).sum())
         prec = tp / (tp + fp) if (tp + fp) else 0.0
         rec = tp / (tp + fn) if (tp + fn) else 0.0
         per_class.append((prec, rec, 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0))
-    metrics = {"accuracy": float((preds == labels).mean()), "macro_f1": float(np.mean([f for _, _, f in per_class]))}
+    return per_class
+
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    logits, labels = np.asarray(logits), np.asarray(labels)
+    preds = logits.argmax(-1)
+    per_class = per_class_scores(preds, labels, logits.shape[1])
+    metrics ={"accuracy": float((preds == labels).mean()), "macro_f1": float(np.mean([f for _, _, f in per_class]))}
     if logits.shape[1] == 2:  # report the positive class (delta, switched)
         prec, rec, f1 = per_class[1]
         metrics.update(precision=prec, recall=rec, f1=f1, auroc=binary_auroc(logits[:, 1] - logits[:, 0], labels))
@@ -101,12 +146,27 @@ def main():
     max_steps  = 4   if args.smoke else -1
     batch_size = 1   if args.smoke else BATCH_SIZE
     grad_accum = 1   if args.smoke else GRAD_ACCUM
-    max_length = 256 if args.smoke else MAX_LENGTH
+    max_length = 256 if args.smoke else args.max_length
     save_steps = 2   if args.smoke else SAVE_STEPS
 
     ds = load_dataset(DATASET_REPO, args.dataset_config, revision=args.dataset_revision, token=HF_TOKEN).rename_column("label", "labels")
+    if args.split == "temporal":  # before a smoke run picks its rows, so that it has rows in every part
+        ds = temporal_split(ds)
     if args.smoke:
         ds = DatasetDict({k: v.select(range(32)) for k, v in ds.items()})
+    if args.audience != "none":
+        ds = add_profiles(ds, args.audience, args.shuffle_audience, revision=args.audience_revision)
+    if args.voter_record != "none":  # after the profile, so the input is: resolution, side before, profile, record, debate
+        ds = add_records(ds, args.voter_record, shuffle=args.shuffle_audience)
+    # a run with another split, a profile, a voting record, another token limit or another seed keeps
+    # its own outputs and model repo; jobs/train.sub derives the same name
+    run_name = (args.dataset_config + ("" if args.split == "random" else f"-{args.split}")
+                + ("" if args.audience == "none" else f"-audience-{args.audience}")
+                + ("" if args.voter_record == "none" else f"-record-{args.voter_record}")
+                + ("" if args.max_length == MAX_LENGTH else f"-len{args.max_length}")
+                + ("" if args.seed == DEFAULT_SEED else f"-seed{args.seed}"))
+    model_repo = f"{MODEL_REPO}-{run_name}"
+    evaluate_only = args.eval_only is not None
 
     label_names = ds["train"].features["labels"].names
     counts = np.bincount(list(ds["train"]["labels"]), minlength=len(label_names))
@@ -121,12 +181,23 @@ def main():
 
     ds = ds.map(tokenize, batched=True, remove_columns=["original", "reply"])
 
-    model = AutoModelForSequenceClassification.from_pretrained(
-        MODEL_NAME, num_labels=len(label_names),
-        id2label=dict(enumerate(label_names)),
-        label2id={n: i for i, n in enumerate(label_names)},
-        token=HF_TOKEN,
-    )
+    if evaluate_only:
+        source = args.eval_only or model_repo
+        model = AutoModelForSequenceClassification.from_pretrained(source, token=HF_TOKEN)
+        model_labels = [model.config.id2label[i] for i in range(model.config.num_labels)]
+        if model_labels != label_names:
+            raise SystemExit(f"{source} predicts {model_labels}, but {args.dataset_config} has the classes {label_names}")
+        print(f"[EVAL ONLY] scoring the test split with {source}; nothing is trained or pushed")
+    else:
+        # The classifier on top of the encoder starts from random weights, drawn here. The Trainer sets
+        # the seed only when it is built, which is after this, so set it now.
+        set_seed(args.seed)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            MODEL_NAME, num_labels=len(label_names),
+            id2label=dict(enumerate(label_names)),
+            label2id={n: i for i, n in enumerate(label_names)},
+            token=HF_TOKEN,
+        )
 
     if args.freeze:
         for p in model.base_model.parameters():
@@ -139,8 +210,7 @@ def main():
         print("[PRECISION] --bf16 requested but this GPU does not support it; using fp32")
     print(f"[PRECISION] {'bf16 mixed precision' if use_bf16 else 'fp32'}")
     # smoke runs get their own dir so a real run never resumes from a smoke checkpoint
-    outputdir = f"outputs/{args.dataset_config}" + ("-smoke" if args.smoke else "")
-    model_repo = f"{MODEL_REPO}-{args.dataset_config}"
+    outputdir = f"outputs/{run_name}" + ("-smoke" if args.smoke else "")
     targs = TrainingArguments(
         output_dir=outputdir,
         per_device_train_batch_size=batch_size,
@@ -149,6 +219,7 @@ def main():
         num_train_epochs=epochs,
         max_steps=max_steps,
         learning_rate=LR,
+        seed=args.seed,
         bf16=use_bf16,
         eval_strategy="steps",
         eval_steps=save_steps,
@@ -161,7 +232,7 @@ def main():
         # so on balanced cmv it preferred checkpoints that call most replies "delta"
         metric_for_best_model="auroc" if len(label_names) == 2 else "macro_f1",
         report_to="none",
-        push_to_hub=args.push and not args.smoke,
+        push_to_hub=args.push and not args.smoke and not evaluate_only,
         hub_model_id=model_repo,
         hub_private_repo=True,  # only applies when the repo is created; change visibility on the Hub
         # no hub_token: it would be pickled into every checkpoint's training_args.bin and pushed
@@ -175,13 +246,14 @@ def main():
         compute_loss_func=weighted_cross_entropy(class_weights),
     )
 
-    # Continue a run cut off by a time limit; delete outputs/<config> to start over.
-    resume = None if args.smoke else last_complete_checkpoint(outputdir)
-    if resume:
-        print(f"[RESUME] continuing from {resume}")
-    trainer.train(resume_from_checkpoint=resume)
-    if torch.cuda.is_available():  # peak over this process, to size future runs
-        print(f"[VRAM] peak allocated {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB, reserved {torch.cuda.max_memory_reserved() / 2**30:.1f} GiB")
+    if not evaluate_only:
+        # Continue a run cut off by a time limit; delete outputs/<run> to start over.
+        resume = None if args.smoke else last_complete_checkpoint(outputdir)
+        if resume:
+            print(f"[RESUME] continuing from {resume}")
+        trainer.train(resume_from_checkpoint=resume)
+        if torch.cuda.is_available():  # peak over this process, to size future runs
+            print(f"[VRAM] peak allocated {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB, reserved {torch.cuda.max_memory_reserved() / 2**30:.1f} GiB")
 
     pred = trainer.predict(ds["test"])
     metrics = {k[5:]: v for k, v in pred.metrics.items() if k.startswith("test_")}
@@ -191,14 +263,40 @@ def main():
     print("\n=== TEST METRICS ===")
     for name, v in metrics.items():
         print(f"  {name:10s}: {v:.4f}" if isinstance(v, float) else f"  {name}: {v}")
+    predicted = pred.predictions.argmax(-1)
+    per_class = {}
+    print("  per class (precision, recall, F1, test rows):")
+    for name, (prec, rec, f1) in zip(label_names, per_class_scores(predicted, pred.label_ids, len(label_names))):
+        per_class[name] = {"precision": prec, "recall": rec, "f1": f1, "rows": int((pred.label_ids == label_names.index(name)).sum())}
+        print(f"    {name:10s}: {prec:.4f}  {rec:.4f}  {f1:.4f}  {per_class[name]['rows']}")
 
-    if args.push and not args.smoke:
+    # The model first: if writing the files below fails, a finished model is not lost.
+    if evaluate_only or args.smoke:
+        pass  # nothing to keep
+    elif args.push:
         trainer.push_to_hub()
         print(f"\nPushed model -> https://huggingface.co/{model_repo} (private)")
-    elif not args.smoke:
+    else:
         trainer.save_model(outputdir)
         tok.save_pretrained(outputdir)
         print(f"\nSaved model locally -> {outputdir}/  (add --push to upload)")
+
+    # Scores per row, for paired comparisons between models and for combining a model with other
+    # features (scripts/t1_t2/compare_models.py): every column that is not model input (ids, voter, label)
+    # plus the logits. The validation split is saved too, so that a combination can be fitted without the
+    # test split. The shuffled-profile control gets its own files.
+    suffix = "_shuffled" if args.shuffle_audience else ""
+    os.makedirs(outputdir, exist_ok=True)
+    kept = [c for c in ds["test"].column_names if c not in tok.model_input_names]
+    for split, logits in (("test", pred.predictions), ("validation", trainer.predict(ds["validation"]).predictions)):
+        ds[split].select_columns(kept).add_column("logits", logits.tolist()).to_parquet(f"{outputdir}/predictions_{split}{suffix}.parquet")
+    with open(f"{outputdir}/test_metrics{suffix}.json", "w") as fh:
+        json.dump({"run": run_name, "dataset": {"config": args.dataset_config, "revision": getattr(args, "dataset_revision", None)},
+                   "split": args.split, "audience": args.audience, "voter_record": args.voter_record,
+                   "shuffled_audience": args.shuffle_audience, "seed": args.seed,
+                   "model": (args.eval_only or model_repo) if evaluate_only else MODEL_NAME, "max_length": max_length,
+                   "metrics": metrics, "per_class": per_class}, fh, indent=2)
+    print(f"\nWrote {outputdir}/predictions_test{suffix}.parquet, predictions_validation{suffix}.parquet and test_metrics{suffix}.json")
 
 if __name__ == "__main__":
     main()
