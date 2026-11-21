@@ -23,6 +23,7 @@ from sklearn.metrics import roc_auc_score
 
 SEED = 42
 PLATFORMS = {"ddo": ("ddo_common", "debate_id"), "cmv": ("cmv_common", "post_id")}  # config, the column rows are grouped by
+TRAINING_SETS = {"ddo": ["ddo"], "cmv": ["cmv"], "both": ["ddo", "cmv"]}  # name -> platforms whose training rows are used
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,6 +40,15 @@ def load(folder: str, config: str, split: str, group: str) -> Dict[str, Any]:
     x = np.log1p(np.array([[len(reply.split()), len(original.split())]
                            for reply, original in zip(table["reply"], table["original"])], dtype=float))
     return {"x": x, "y": np.array(table["label"]), "group": table[group], "pair": table.get("pair_id")}
+
+
+def fit(parts: List[Dict[str, Any]]) -> Tuple[LogisticRegression, np.ndarray, np.ndarray]:
+    """The length model fitted on the training rows of one platform or of several, with the mean and the
+    standard deviation that its two inputs are standardised by."""
+    x = np.concatenate([part["x"] for part in parts])
+    y = np.concatenate([part["y"] for part in parts])
+    mean, std = x.mean(axis=0), x.std(axis=0)
+    return LogisticRegression(class_weight="balanced", max_iter=1000).fit((x - mean) / std, y), mean, std
 
 
 def pairwise_accuracy(scores: np.ndarray, y: np.ndarray, pairs: List[int]) -> float:
@@ -69,15 +79,13 @@ def main() -> None:
     args = parse_args()
     data = {name: {split: load(args.data, config, split, group) for split in ("train", "test")}
             for name, (config, group) in PLATFORMS.items()}
-    training_sets = {"ddo": ["ddo"], "cmv": ["cmv"], "both": ["ddo", "cmv"]}
     results: Dict[str, Dict[str, Any]] = {}
     print(f"{'trained on':11s} {'tested on':10s} {'rows':>6s} {'AUROC':>6s}  {'95% interval':13s} {'pairwise':>8s}  weights (arguments, claim)")
-    for name, parts in training_sets.items():
-        x = np.concatenate([data[p]["train"]["x"] for p in parts])
-        y = np.concatenate([data[p]["train"]["y"] for p in parts])
-        mean, std = x.mean(axis=0), x.std(axis=0)
-        model = LogisticRegression(class_weight="balanced", max_iter=1000).fit((x - mean) / std, y)
-        results[name] = {"train_rows": int(len(y)), "weights": [float(w) for w in model.coef_[0]], "test": {}}
+    for name, parts in TRAINING_SETS.items():
+        train = [data[p]["train"] for p in parts]
+        model, mean, std = fit(train)
+        results[name] = {"train_rows": sum(len(part["y"]) for part in train),
+                         "weights": [float(w) for w in model.coef_[0]], "test": {}}
         for platform in PLATFORMS:
             test = data[platform]["test"]
             scores = model.decision_function((test["x"] - mean) / std)
