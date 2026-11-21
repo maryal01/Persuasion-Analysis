@@ -3,8 +3,8 @@
 **Status:** built and checked on 2026-11-20; no model is trained yet. CMV persuasion (T1) and DDO
 switching (T2) are written in one format, the training script can start from another model and keep
 transfer scores apart, and four runs are prepared. A baseline that sees only text lengths scores AUROC
-0.53 on DDO and 0.52 on CMV, whichever platform it was fitted on. The datasets are local files; they are
-not on the Hub yet.
+0.53 on DDO and 0.52 on CMV, whichever platform it was fitted on. The three configs are on branch `rq2`
+of the private dataset repo (commit `007570a`, uploaded 2026-11-20).
 
 ## Goal
 
@@ -160,6 +160,9 @@ that earned the delta scores higher.
   equal for 29,931 of the 32,078 sides and differs for none (the other 2,147 sides have no row
   there); `cmv_common` has the rows, replies, labels and pairs of `cmv`, and its claim is the start of
   the post on every row.
+- **The upload, checked:** every column of every split on Hub branch `rq2` equals the local build;
+  `main` and the other branches are unchanged; a smoke run of the training script on the Hub copy of
+  `cmv_common` and `joint_common` passes on a CPU.
 - **Checked without a GPU,** on made-up rows: runs without the new options give exactly the same
   scores before and after this change; a run with `--init-from` starts from the named model, has its
   own folder and saves its model; a model scored on another config with `--tag` does not overwrite
