@@ -2,6 +2,7 @@ import argparse
 import glob
 import json
 import os
+import re
 from collections import defaultdict
 
 import numpy as np
@@ -10,6 +11,7 @@ import torch.nn.functional as F
 from datasets import DatasetDict, load_dataset
 from huggingface_hub import login
 from transformers import (
+    AutoConfig,
     AutoModelForSequenceClassification,
     AutoTokenizer,
     DataCollatorWithPadding,
@@ -74,10 +76,28 @@ def parse_args():
                          "extension. Such a run has -record-<kind> in its name (default: %(default)s)")
     ap.add_argument("--shuffle-audience", action="store_true",
                     help="control, with --eval-only: every test voter gets another voter's profile and voting record")
+    ap.add_argument("--init-from", metavar="MODEL",
+                    help="start training from this fine-tuned model (a path or a Hub repo) instead of the pretrained "
+                         "encoder, e.g. a model trained on CMV before it is trained on DDO. Its classes must be the "
+                         "dataset's. Such a run has -init-<model name> in its name, before the seed")
+    ap.add_argument("--tag", metavar="TEXT",
+                    help="appended to the run name as -<TEXT> (before the seed), to keep the outputs of this run apart "
+                         "from another run of the same config, e.g. --eval-only with a model trained on another dataset")
     args = ap.parse_args()
     if args.shuffle_audience and (args.eval_only is None or (args.audience == "none" and args.voter_record == "none")):
         ap.error("--shuffle-audience needs --eval-only and --audience or --voter-record")
+    if args.init_from and args.eval_only is not None:
+        ap.error("--init-from starts a training run; with --eval-only name the model to score after --eval-only")
+    if args.tag and not re.fullmatch(r"[A-Za-z0-9_.-]+", args.tag):
+        ap.error("--tag may hold letters, digits, '_', '.' and '-' only")
     return args
+
+def model_name(model):
+    """Short name of a fine-tuned model for a run name: the last part of its path or repo, without the
+    prefix of this project's model repos. jobs/train.sub derives the same name."""
+    name = os.path.basename(model.rstrip("/"))
+    prefix = os.path.basename(MODEL_REPO) + "-"
+    return name[len(prefix):] if name.startswith(prefix) else name
 
 def binary_auroc(scores, labels):
     """Chance a random positive outscores a random negative (ties count half); nan if a class is absent."""
@@ -158,12 +178,14 @@ def main():
         ds = add_profiles(ds, args.audience, args.shuffle_audience, revision=args.audience_revision)
     if args.voter_record != "none":  # after the profile, so the input is: resolution, side before, profile, record, debate
         ds = add_records(ds, args.voter_record, shuffle=args.shuffle_audience)
-    # a run with another split, a profile, a voting record, another token limit or another seed keeps
-    # its own outputs and model repo; jobs/train.sub derives the same name
+    # a run with another split, a profile, a voting record, another token limit, another start model, a tag
+    # or another seed keeps its own outputs and model repo; jobs/train.sub derives the same name
     run_name = (args.dataset_config + ("" if args.split == "random" else f"-{args.split}")
                 + ("" if args.audience == "none" else f"-audience-{args.audience}")
                 + ("" if args.voter_record == "none" else f"-record-{args.voter_record}")
                 + ("" if args.max_length == MAX_LENGTH else f"-len{args.max_length}")
+                + (f"-init-{model_name(args.init_from)}" if args.init_from else "")
+                + (f"-{args.tag}" if args.tag else "")
                 + ("" if args.seed == DEFAULT_SEED else f"-seed{args.seed}"))
     model_repo = f"{MODEL_REPO}-{run_name}"
     evaluate_only = args.eval_only is not None
@@ -192,8 +214,14 @@ def main():
         # The classifier on top of the encoder starts from random weights, drawn here. The Trainer sets
         # the seed only when it is built, which is after this, so set it now.
         set_seed(args.seed)
+        if args.init_from:  # a fine-tuned model: its classifier is kept, so its classes must be this dataset's
+            start = AutoConfig.from_pretrained(args.init_from, token=HF_TOKEN)
+            start_labels = [start.id2label[i] for i in range(start.num_labels)]
+            if start_labels != label_names:
+                raise SystemExit(f"{args.init_from} predicts {start_labels}, but {args.dataset_config} has the classes {label_names}")
+            print(f"[INIT] training starts from {args.init_from}, not from {MODEL_NAME}")
         model = AutoModelForSequenceClassification.from_pretrained(
-            MODEL_NAME, num_labels=len(label_names),
+            args.init_from or MODEL_NAME, num_labels=len(label_names),
             id2label=dict(enumerate(label_names)),
             label2id={n: i for i, n in enumerate(label_names)},
             token=HF_TOKEN,
@@ -294,7 +322,8 @@ def main():
         json.dump({"run": run_name, "dataset": {"config": args.dataset_config, "revision": getattr(args, "dataset_revision", None)},
                    "split": args.split, "audience": args.audience, "voter_record": args.voter_record,
                    "shuffled_audience": args.shuffle_audience, "seed": args.seed,
-                   "model": (args.eval_only or model_repo) if evaluate_only else MODEL_NAME, "max_length": max_length,
+                   "model": (args.eval_only or model_repo) if evaluate_only else (args.init_from or MODEL_NAME),
+                   "tag": args.tag, "max_length": max_length,
                    "metrics": metrics, "per_class": per_class}, fh, indent=2)
     print(f"\nWrote {outputdir}/predictions_test{suffix}.parquet, predictions_validation{suffix}.parquet and test_metrics{suffix}.json")
 
