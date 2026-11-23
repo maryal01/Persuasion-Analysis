@@ -5,7 +5,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from datasets import Dataset, load_dataset
@@ -60,13 +60,15 @@ class Split:
     texts: List[str]         # cleaned title + body of the post
     features: np.ndarray     # (posts, 211) LIWC and Receptiviti values of the author
     labels: np.ndarray       # 1 if DeltaBot confirmed a delta that the author awarded
+    history_items: Optional[List[List[str]]] = None  # history configs, chunk mode: the cleaned history items of each post, stored order
 
     def __len__(self) -> int:
         return len(self.labels)
 
     def first(self, n: int) -> "Split":
         """The first n posts."""
-        return Split(self.authors[:n], self.created_utc[:n], self.texts[:n], self.features[:n], self.labels[:n])
+        items = None if self.history_items is None else self.history_items[:n]
+        return Split(self.authors[:n], self.created_utc[:n], self.texts[:n], self.features[:n], self.labels[:n], items)
 
     def years(self) -> np.ndarray:
         """Year of the post with the fraction of the year that has passed (2015.5 = mid 2015)."""
@@ -103,6 +105,54 @@ def load_t5_data(revision: str = HUB_REVISION) -> T5Data:
     names_file = hf_hub_download(HUB_REPO, f"{HUB_CONFIG}/feature_names.json", repo_type="dataset", revision=commit)
     feature_names = json.loads(Path(names_file).read_text())
     return T5Data(*(to_split(tables[name]) for name in SPLIT_NAMES), feature_names=feature_names, hub_commit=commit)
+
+
+# --- the configs with the OP's history ----------------------------------------------------------------------------------
+# cmv_thread_history and cmv_thread_own_history (built by Manish) hold "<history items> [SEP] <post>" in `original`; each item starts
+# with [comment], [post] or [reply in own thread]; a post without history has "[no history]". The items are written before the post
+# (analysis/2026-11-23_t5_thread_history). Only `original` is used: `reply` is the discussion under the post, not part of T5.
+
+HISTORY_CONFIGS = ("cmv_thread_history", "cmv_thread_own_history")
+HISTORY_SEPARATOR = " [SEP] "
+_HISTORY_ITEM = re.compile(r"(?:^|\n\n)(?=\[(?:comment|post|reply in own thread)\] )")
+
+
+def split_original(original: str) -> Tuple[List[str], str]:
+    """(history items in stored order, post) of an `original` field; no items when the post has no history."""
+    history, post = original.rsplit(HISTORY_SEPARATOR, 1)
+    if history.strip() == "[no history]":
+        return [], post
+    return [item.strip() for item in _HISTORY_ITEM.split(history) if item.strip()], post
+
+
+def post_with_history(original: str) -> str:
+    """The cleaned post, then the cleaned history items from the last stored to the first, so that cutting the text at the
+    token limit drops the earliest items (the stored order is mostly, not always, chronological; see the analysis README)."""
+    items, post = split_original(original)
+    history = [clean_text(item) for item in reversed(items)] or ["[no history]"]
+    return clean_text(post) + "\n\n[HISTORY]\n\n" + "\n\n".join(history)
+
+
+HISTORY_FORMATS = ("none", "text", "items")  # post only; post followed by the history as one text; post and the history items apart
+
+
+def history_to_split(table: Dataset, history_format: str) -> Split:
+    """One split of a history config; `features` is empty (no author numbers)."""
+    parsed = [split_original(original) for original in table["original"]]
+    if history_format == "text":
+        texts = [post_with_history(original) for original in table["original"]]
+    else:
+        texts = [clean_text(post) for _, post in parsed]
+    items = [[clean_text(item) for item in history] for history, _ in parsed] if history_format == "items" else None
+    return Split(authors=table["author"], created_utc=np.array(table["created_utc"]), texts=texts,
+                 features=np.zeros((len(texts), 0)), labels=np.array(table["label"]), history_items=items)
+
+
+def load_history_data(config: str, history_format: str, revision: str = HUB_REVISION) -> T5Data:
+    """Read a history config at the given branch (or commit); history_format is one of HISTORY_FORMATS."""
+    commit = HfApi().dataset_info(HUB_REPO, revision=revision).sha
+    tables = load_dataset(HUB_REPO, config, revision=commit)
+    return T5Data(*(history_to_split(tables[name], history_format) for name in SPLIT_NAMES), feature_names=[], hub_commit=commit)
 
 
 def fit_scaler(train_features: np.ndarray, feature_names: Sequence[str]) -> Callable[[np.ndarray], np.ndarray]:
