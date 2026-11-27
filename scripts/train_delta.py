@@ -208,6 +208,8 @@ def main():
         raise SystemExit(f"--pairwise needs a config with pair_id and two labels; {args.dataset_config} has neither or more labels")
     pair_ids = {k: v["pair_id"] if "pair_id" in v.column_names else None for k, v in ds.items()}
     test_words = [len(reply.split()) for reply in ds["test"]["reply"]]
+    # cmv_vote_pairs_all: test accuracy is also reported per kind (votes, delta) and per level (top_level)
+    test_groups = {c: ds["test"][c] for c in ("kind", "top_level") if c in ds["test"].column_names}
 
     tok = AutoTokenizer.from_pretrained(MODEL_NAME, token=HF_TOKEN)
     tok.truncation_side = args.truncation_side
@@ -320,6 +322,11 @@ def main():
         metrics["pairwise_acc"] = pairwise_accuracy(scores, pred.label_ids, pair_ids["test"])
         # pairs whose label-1 reply is the shorter one: below 0.5 means the model mostly ranks by length
         metrics["pairwise_acc_shorter_won"] = pairwise_accuracy(scores, pred.label_ids, pair_ids["test"], test_words)
+        for column, values in test_groups.items():  # both rows of a pair share these
+            for value in sorted(set(values)):
+                keep = [i for i, v in enumerate(values) if v == value]
+                metrics[f"pairwise_acc_{column}={value}"] = pairwise_accuracy(
+                    scores[keep], pred.label_ids[keep], [pair_ids["test"][i] for i in keep])
     print("\n=== TEST METRICS ===")
     for name, v in metrics.items():
         print(f"  {name:10s}: {v:.4f}" if isinstance(v, float) else f"  {name}: {v}")
