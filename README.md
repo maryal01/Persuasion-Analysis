@@ -99,6 +99,25 @@ Data is loaded from the dataset repo's `main` branch. Its `cmv` config has a dif
 the `t1-t2` branch's `cmv`, which the first T1 run in `RESULTS.md` used: only 56 of the 578 `t1-t2`
 test posts are `main` test posts, so that run's 66.1% is not comparable with runs on `main`.
 
+`--dataset-revision` loads a config as it was at an earlier commit of the dataset repo, and the run is
+named `<config>-rev<commit>`. The first `cmv_thread_matched` (commit `a1d18ad55440e3ff6de3878eb8a92f5498d5b7f1`,
+12 Nov to 15 Nov; 30,494 / 3,713 / 3,783 rows) cut each no-delta thread to a turn count drawn at random
+from the delta threads and kept every thread, so no-delta threads ended up shorter (median 12 turns
+against 16). It is the data of the 0.755 AUROC run. The current `cmv_thread_matched` pairs each delta
+thread with one no-delta thread of the same turn count and drops the rest (21,048 / 2,608 / 2,588 rows).
+
+`--seed` sets the classifier head's initialization, the data order and dropout (default 42; another seed
+adds `-seed<N>` to the run name). `--save-scores` writes every validation and test row's score with its
+label and ids to `outputs/<run>/scores-<split>.jsonl`, also uploaded with `--push`.
+`scripts/combine_scores.py` reads those files for several runs of one thread config and reports test
+AUROC for each run, their ensemble, the post date and the thread's shape alone, and the ensemble with
+them, each combination fit on validation, with bootstrap intervals:
+
+```bash
+python scripts/combine_scores.py --dataset-config cmv_thread_matched --dataset-revision a1d18ad55440e3ff6de3878eb8a92f5498d5b7f1 \
+    outputs/cmv_thread_matched-reva1d18ad outputs/cmv_thread_matched-reva1d18ad-seed43 outputs/cmv_thread_matched-reva1d18ad-seed44
+```
+
 Inputs are cut to 8,192 tokens, the most ModernBERT reads. `cmv_thread` (a post and its whole
 discussion up to the OP's first award attempt) has long inputs: 23% of the threads exceed that.
 `--truncation-side left` cuts the start of the discussion rather than its end, which keeps the

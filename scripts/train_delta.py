@@ -1,5 +1,6 @@
 import argparse
 import glob
+import json
 import os
 import shutil
 from collections import defaultdict
@@ -15,6 +16,7 @@ from transformers import (
     EarlyStoppingCallback,
     Trainer,
     TrainingArguments,
+    set_seed,
 )
 
 DATASET_REPO = "nlp-final-project11/persuasion-datasets"
@@ -25,13 +27,24 @@ EFFECTIVE_BATCH = 32  # rows (pairs with --pairwise) per optimizer step over all
 BATCH_SIZE = 4  # default rows (pairs) per GPU per forward pass (--batch-size), sized for an 80 GB A100 at 8,192 tokens
 EPOCHS = 3
 LR = 2e-5
+SEED = 42  # the Trainer's default seed
 SAVE_STEPS = 500  # eval + checkpoint interval; bounds the work lost when a job hits its time limit
+ID_COLUMNS = ("post_id", "pair_id")  # written next to each score by --save-scores, to line rows up later
 
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Fine-tune ModernBERT on a persuasion dataset.")
     ap.add_argument("--dataset-config", default = "cmv", help="dataset config/subset name (cmv, cmv_thread, ddo_switch, ddo_undecided); omit for default")
+    ap.add_argument("--dataset-revision", default="main",
+                    help="branch or commit of the dataset repo to load, e.g. an older build of a config; a run on "
+                         "a commit is named <config>-rev<first 7 characters> (default: %(default)s)")
+    ap.add_argument("--seed", type=int, default=SEED,
+                    help="seed for the classifier head's initialization, data order and dropout; a run with another "
+                         "seed is named <config>-seed<N> (default: %(default)s)")
+    ap.add_argument("--save-scores", action="store_true",
+                    help="write each validation and test row's score (logit 1 - logit 0) with its label and ids to "
+                         "outputs/<run>/scores-<split>.jsonl, for scripts/combine_scores.py (pushed with the model)")
     ap.add_argument("--truncation-side", choices=("right", "left"), default="right",
                     help="which end of an over-long text is cut; left keeps the end of the reply, "
                          "i.e. the latest comments of a cmv_thread discussion (default: %(default)s)")
@@ -65,9 +78,14 @@ def parse_args():
     return ap.parse_args()
 
 def run_name(args):
-    """<config>, plus -pairwise with --pairwise and -from-<model> with --init-model, so such a run never
-    resumes from or overwrites the plain run of the same config (locally or on the Hub)."""
+    """<config>, plus -pairwise with --pairwise, -rev<commit> with --dataset-revision, -seed<N> with
+    another --seed and -from-<model> with --init-model, so such a run never resumes from or overwrites
+    the plain run of the same config (locally or on the Hub)."""
     name = args.dataset_config + ("-pairwise" if args.pairwise else "") + ("-eval" if args.eval_only else "")
+    if args.dataset_revision != "main":
+        name += f"-rev{args.dataset_revision[:7]}"
+    if args.seed != SEED:
+        name += f"-seed{args.seed}"
     if not args.init_model:
         return name
     model = os.path.basename(args.init_model.rstrip("/")).removeprefix(MODEL_REPO.split("/")[1] + "-")
@@ -168,6 +186,19 @@ def weighted_cross_entropy(weights):
         return loss / (num_items_in_batch if num_items_in_batch is not None else labels.numel())
     return loss_fn
 
+def write_scores(path, predictions, labels, ids):
+    """One JSON line per row, in split order: row index, label, ids (post_id, pair_id) and the score
+    (logit 1 - logit 0), or every logit for configs with more than two labels."""
+    with open(path, "w") as fh:
+        for i, (logits, label) in enumerate(zip(predictions, labels)):
+            row = {"row": i, "label": int(label), **{c: values[i] for c, values in ids.items()}}
+            if len(logits) == 2:
+                row["score"] = float(logits[1] - logits[0])
+            else:
+                row["logits"] = [float(x) for x in logits]
+            fh.write(json.dumps(row) + "\n")
+    print(f"[SCORES] {path}")
+
 def last_complete_checkpoint(outputdir):
     """Newest checkpoint-N in outputdir, or None. The Trainer writes trainer_state.json last,
     so a checkpoint cut off mid-save (e.g. by a Slurm time limit) lacks it and is skipped.
@@ -194,9 +225,13 @@ def main():
     unit = "pairs" if args.pairwise else "rows"
     print(f"[BATCH] {batch_size} per GPU x {n_gpus} GPUs x {grad_accum} accumulation = {batch_size * n_gpus * grad_accum} {unit} per step")
 
-    ds = load_dataset(DATASET_REPO, args.dataset_config, token=HF_TOKEN).rename_column("label", "labels")
+    ds = load_dataset(DATASET_REPO, args.dataset_config, revision=args.dataset_revision, token=HF_TOKEN).rename_column("label", "labels")
     if args.smoke:
         ds = DatasetDict({k: v.select(range(32)) for k, v in ds.items()})
+    if args.dataset_revision != "main":
+        print(f"[DATA] {args.dataset_config} at revision {args.dataset_revision}: "
+              + ", ".join(f"{k} {len(v)}" for k, v in ds.items()))
+    row_ids = {k: {c: v[c] for c in ID_COLUMNS if c in v.column_names} for k, v in ds.items() if k != "train"}
 
     label_names = ds["train"].features["labels"].names
     counts = np.bincount(list(ds["train"]["labels"]), minlength=len(label_names))
@@ -239,6 +274,7 @@ def main():
 
     # With --init-model the encoder and, when the label count matches, the classifier head carry over; the
     # head's class 1 then keeps its meaning (cmv_vote_pairs "higher" -> cmv "delta"). Otherwise the head is new.
+    set_seed(args.seed)  # before the model is built, so the seed also sets a new head's initial weights
     model = AutoModelForSequenceClassification.from_pretrained(
         args.init_model or MODEL_NAME, num_labels=len(label_names),
         id2label=dict(enumerate(label_names)),
@@ -270,6 +306,7 @@ def main():
         num_train_epochs=epochs,
         max_steps=max_steps,
         learning_rate=LR,
+        seed=args.seed,
         bf16=use_bf16,
         eval_strategy="steps",
         eval_steps=save_steps,
@@ -330,6 +367,13 @@ def main():
     print("\n=== TEST METRICS ===")
     for name, v in metrics.items():
         print(f"  {name:10s}: {v:.4f}" if isinstance(v, float) else f"  {name}: {v}")
+
+    if args.save_scores:  # before the push, so the scores are uploaded with the model
+        preds = {"validation": trainer.predict(ds["validation"]), "test": pred}  # every GPU process predicts
+        if trainer.is_world_process_zero():
+            os.makedirs(outputdir, exist_ok=True)
+            for split, p in preds.items():
+                write_scores(os.path.join(outputdir, f"scores-{split}.jsonl"), p.predictions, p.label_ids, row_ids[split])
 
     if args.eval_only:
         return
