@@ -63,13 +63,18 @@ python scripts/train_delta.py --smoke
 python scripts/train_delta.py --dataset-config cmv_thread --truncation-side left --bf16
 
 # T1 with vote pairs as extra training: train on cmv_vote_pairs, then fine-tune that model on cmv
-python scripts/train_delta.py --dataset-config cmv_vote_pairs --bf16 --push
+python scripts/train_delta.py --dataset-config cmv_vote_pairs --bf16 --early-stopping 5 --push
 python scripts/train_delta.py --dataset-config cmv --bf16 --init-model nlp-final-project11/nlp-project-modernbert-cmv_vote_pairs
 
-# the same with every vote pair (about 450,000 training pairs; one epoch is 3.7x the rows of 3 epochs above)
-python scripts/train_delta.py --dataset-config cmv_vote_pairs_all --bf16 --epochs 1 --push
+# the same with every vote pair (about 250,000 training rows instead of 81,000)
+python scripts/train_delta.py --dataset-config cmv_vote_pairs_all --bf16 --early-stopping 5 --push
 python scripts/train_delta.py --dataset-config cmv --bf16 --init-model nlp-final-project11/nlp-project-modernbert-cmv_vote_pairs_all
 ```
+
+Against overfitting, every run evaluates on the validation split every 500 steps and ends on its best
+checkpoint there; `--early-stopping 5` also stops training once five evaluations in a row have not
+improved on it, so a long run does not keep fitting the training replies. Validation and test posts
+come from other OPs than the training posts, so they measure replies the model has not seen.
 
 `--init-model` starts from a fine-tuned model (a Hub repo or a local folder) instead of
 ModernBERT-base. The run is named `<config>-from-<model>` (here `cmv-from-cmv_vote_pairs`), for its

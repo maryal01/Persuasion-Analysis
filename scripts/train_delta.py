@@ -11,6 +11,7 @@ from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
     DataCollatorWithPadding,
+    EarlyStoppingCallback,
     Trainer,
     TrainingArguments,
 )
@@ -41,6 +42,9 @@ def parse_args():
                     help=f"rows per GPU per forward pass; gradient accumulation keeps {EFFECTIVE_BATCH} rows per "
                          "optimizer step for any batch size and GPU count (default: %(default)s)")
     ap.add_argument("--epochs", type=float, default=EPOCHS, help="passes over the training split (default: %(default)s)")
+    ap.add_argument("--early-stopping", type=int, default=0, metavar="EVALS",
+                    help="stop once the validation metric (AUROC; macro-F1 for 3 classes) has not improved for "
+                         f"this many evaluations, {SAVE_STEPS} steps apart; 0 trains every epoch (default: %(default)s)")
     ap.add_argument("--init-model", default=None,
                     help="start from this fine-tuned model (Hub repo or local folder) instead of ModernBERT-base, "
                          "e.g. nlp-final-project11/nlp-project-modernbert-cmv_vote_pairs; the run is named "
@@ -202,6 +206,10 @@ def main():
         train_dataset=ds["train"], eval_dataset=ds["validation"],
         data_collator=collator, compute_metrics=compute_metrics,
         compute_loss_func=weighted_cross_entropy(class_weights),
+        # the best validation checkpoint is loaded at the end either way; this also stops training once
+        # validation stops improving (smoke runs skip it: they keep no best checkpoint)
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=args.early_stopping)]
+                  if args.early_stopping and not args.smoke else None,
     )
 
     # Continue a run cut off by a time limit; delete outputs/<run> to start over.
