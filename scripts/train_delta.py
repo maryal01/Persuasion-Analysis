@@ -51,6 +51,9 @@ def parse_args():
                     help="train on pairs (configs with pair_id: cmv, cmv_vote_pairs, cmv_vote_pairs_all): each step "
                          "scores both replies of a pair and the loss pushes the label-1 reply's score above the "
                          "other's; the best checkpoint is picked by validation pairwise accuracy")
+    ap.add_argument("--eval-only", action="store_true",
+                    help="no training: score the test split with --init-model (e.g. the stage-1 vote model on cmv) "
+                         "and print the test metrics; nothing is saved or pushed")
     ap.add_argument("--gradient-checkpointing", action="store_true",
                     help="recompute activations in the backward pass: less GPU memory, about 30%% slower")
     ap.add_argument("--init-model", default=None,
@@ -64,7 +67,7 @@ def parse_args():
 def run_name(args):
     """<config>, plus -pairwise with --pairwise and -from-<model> with --init-model, so such a run never
     resumes from or overwrites the plain run of the same config (locally or on the Hub)."""
-    name = args.dataset_config + ("-pairwise" if args.pairwise else "")
+    name = args.dataset_config + ("-pairwise" if args.pairwise else "") + ("-eval" if args.eval_only else "")
     if not args.init_model:
         return name
     model = os.path.basename(args.init_model.rstrip("/")).removeprefix(MODEL_REPO.split("/")[1] + "-")
@@ -279,7 +282,7 @@ def main():
         remove_unused_columns=not args.pairwise,
         gradient_checkpointing=args.gradient_checkpointing,
         report_to="none",
-        push_to_hub=args.push and not args.smoke,
+        push_to_hub=args.push and not args.smoke and not args.eval_only,
         hub_model_id=model_repo,
         hub_private_repo=True,  # only applies when the repo is created; change visibility on the Hub
         # no hub_token: it would be pickled into every checkpoint's training_args.bin and pushed
@@ -299,11 +302,14 @@ def main():
     else:
         trainer = Trainer(data_collator=collator, compute_loss_func=weighted_cross_entropy(class_weights), **common)
 
-    # Continue a run cut off by a time limit; delete outputs/<run> to start over.
-    resume = None if args.smoke else last_complete_checkpoint(outputdir)
-    if resume:
-        print(f"[RESUME] continuing from {resume}")
-    trainer.train(resume_from_checkpoint=resume)
+    if args.eval_only:
+        print(f"[EVAL ONLY] scoring the {args.dataset_config} test split with {args.init_model or MODEL_NAME}, no training")
+    else:
+        # Continue a run cut off by a time limit; delete outputs/<run> to start over.
+        resume = None if args.smoke else last_complete_checkpoint(outputdir)
+        if resume:
+            print(f"[RESUME] continuing from {resume}")
+        trainer.train(resume_from_checkpoint=resume)
     if torch.cuda.is_available():  # peak over this process, to size future runs
         print(f"[VRAM] peak allocated {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB, reserved {torch.cuda.max_memory_reserved() / 2**30:.1f} GiB")
 
@@ -318,6 +324,8 @@ def main():
     for name, v in metrics.items():
         print(f"  {name:10s}: {v:.4f}" if isinstance(v, float) else f"  {name}: {v}")
 
+    if args.eval_only:
+        return
     if args.push and not args.smoke:
         trainer.push_to_hub()
         print(f"\nPushed model -> https://huggingface.co/{model_repo} (private)")
