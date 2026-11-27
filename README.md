@@ -66,10 +66,22 @@ python scripts/train_delta.py --dataset-config cmv_thread --truncation-side left
 python scripts/train_delta.py --dataset-config cmv_vote_pairs --bf16 --early-stopping 5 --push
 python scripts/train_delta.py --dataset-config cmv --bf16 --init-model nlp-final-project11/nlp-project-modernbert-cmv_vote_pairs
 
-# the same with vote pairs at every depth of a thread plus delta-vs-well-voted pairs (222,414 training rows instead of 81,432)
-python scripts/train_delta.py --dataset-config cmv_vote_pairs_all --bf16 --early-stopping 5 --push
-python scripts/train_delta.py --dataset-config cmv --bf16 --init-model nlp-final-project11/nlp-project-modernbert-cmv_vote_pairs_all
+# pairwise: every vote pair at every depth of a thread plus delta-vs-well-voted pairs, then cmv, both
+# trained on comparisons; compare with the plain pairwise cmv run (outputs/cmv-pairwise)
+python scripts/train_delta.py --dataset-config cmv_vote_pairs_all --pairwise --bf16 --early-stopping 5 --push
+python scripts/train_delta.py --dataset-config cmv --pairwise --bf16 --init-model nlp-final-project11/nlp-project-modernbert-cmv_vote_pairs_all-pairwise
+python scripts/train_delta.py --dataset-config cmv --pairwise --bf16
 ```
+
+`--pairwise` trains on comparisons instead of single rows, as reward models are trained: each step
+scores both replies of a pair (`pair_id`) with the same network, and the loss,
+−log σ(score(label 1) − score(label 0)), is small when the label-1 reply (`delta`, `higher`) scores
+higher. Only the order within a pair matters, so a reply can win one pair and lose another, and a
+reply in several pairs is several lessons. A reply's score is logit 1 − logit 0, the score the test
+ranks by. Validation and test are still scored row by row; the best checkpoint is the one with the
+highest validation pairwise accuracy. `--batch-size` then counts pairs (two texts each), and the run is
+named `<config>-pairwise`. Every test with pairs also reports `pairwise_acc_shorter_won`, the accuracy on
+pairs whose label-1 reply is the shorter one: below 0.5 means the model mostly ranks by length.
 
 Against overfitting, every run evaluates on the validation split every 500 steps and ends on its best
 checkpoint there; `--early-stopping 5` also stops training once five evaluations in a row have not

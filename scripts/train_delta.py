@@ -7,7 +7,7 @@ from collections import defaultdict
 import numpy as np
 import torch
 import torch.nn.functional as F
-from datasets import DatasetDict, load_dataset
+from datasets import Dataset, DatasetDict, load_dataset
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
@@ -21,8 +21,8 @@ DATASET_REPO = "nlp-final-project11/persuasion-datasets"
 MODEL_NAME = "answerdotai/ModernBERT-base" 
 MODEL_REPO = "nlp-final-project11/nlp-project-modernbert"  # pushed to {MODEL_REPO}-{run_name}
 MAX_LENGTH = 8192  # the most ModernBERT reads
-EFFECTIVE_BATCH = 32  # rows per optimizer step over all GPUs; gradient accumulation makes up the rest
-BATCH_SIZE = 4  # default rows per GPU per forward pass (--batch-size), sized for an 80 GB A100 at 8,192 tokens
+EFFECTIVE_BATCH = 32  # rows (pairs with --pairwise) per optimizer step over all GPUs; gradient accumulation makes up the rest
+BATCH_SIZE = 4  # default rows (pairs) per GPU per forward pass (--batch-size), sized for an 80 GB A100 at 8,192 tokens
 EPOCHS = 3
 LR = 2e-5
 SAVE_STEPS = 500  # eval + checkpoint interval; bounds the work lost when a job hits its time limit
@@ -44,8 +44,15 @@ def parse_args():
                          "optimizer step for any batch size and GPU count (default: %(default)s)")
     ap.add_argument("--epochs", type=float, default=EPOCHS, help="passes over the training split (default: %(default)s)")
     ap.add_argument("--early-stopping", type=int, default=0, metavar="EVALS",
-                    help="stop once the validation metric (AUROC; macro-F1 for 3 classes) has not improved for "
-                         f"this many evaluations, {SAVE_STEPS} steps apart; 0 trains every epoch (default: %(default)s)")
+                    help="stop once the validation metric (AUROC; macro-F1 for 3 classes; pairwise accuracy with "
+                         f"--pairwise) has not improved for this many evaluations, {SAVE_STEPS} steps apart; "
+                         "0 trains every epoch (default: %(default)s)")
+    ap.add_argument("--pairwise", action="store_true",
+                    help="train on pairs (configs with pair_id: cmv, cmv_vote_pairs, cmv_vote_pairs_all): each step "
+                         "scores both replies of a pair and the loss pushes the label-1 reply's score above the "
+                         "other's; the best checkpoint is picked by validation pairwise accuracy")
+    ap.add_argument("--gradient-checkpointing", action="store_true",
+                    help="recompute activations in the backward pass: less GPU memory, about 30%% slower")
     ap.add_argument("--init-model", default=None,
                     help="start from this fine-tuned model (Hub repo or local folder) instead of ModernBERT-base, "
                          "e.g. nlp-final-project11/nlp-project-modernbert-cmv_vote_pairs; the run is named "
@@ -55,12 +62,13 @@ def parse_args():
     return ap.parse_args()
 
 def run_name(args):
-    """<config>, or <config>-from-<model> when starting from --init-model, so such a run never resumes from
-    or overwrites the plain run of the same config (locally or on the Hub)."""
+    """<config>, plus -pairwise with --pairwise and -from-<model> with --init-model, so such a run never
+    resumes from or overwrites the plain run of the same config (locally or on the Hub)."""
+    name = args.dataset_config + ("-pairwise" if args.pairwise else "")
     if not args.init_model:
-        return args.dataset_config
+        return name
     model = os.path.basename(args.init_model.rstrip("/")).removeprefix(MODEL_REPO.split("/")[1] + "-")
-    return f"{args.dataset_config}-from-{model}"
+    return f"{name}-from-{model}"
 
 def binary_auroc(scores, labels):
     """Chance a random positive outscores a random negative (ties count half); nan if a class is absent."""
@@ -71,31 +79,81 @@ def binary_auroc(scores, labels):
     ranks = (np.cumsum(counts) - (counts - 1) / 2)[inverse]  # 1-based ranks, averaged over ties
     return float((ranks[labels == 1].sum() - pos * (pos + 1) / 2) / (pos * neg))
 
-def compute_metrics(eval_pred):
-    logits, labels = eval_pred
-    logits, labels = np.asarray(logits), np.asarray(labels)
-    preds = logits.argmax(-1)
-    per_class = []
-    for c in range(logits.shape[1]):
-        tp = int(((preds == c) & (labels == c)).sum())
-        fp = int(((preds == c) & (labels != c)).sum())
-        fn = int(((preds != c) & (labels == c)).sum())
-        prec = tp / (tp + fp) if (tp + fp) else 0.0
-        rec = tp / (tp + fn) if (tp + fn) else 0.0
-        per_class.append((prec, rec, 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0))
-    metrics = {"accuracy": float((preds == labels).mean()), "macro_f1": float(np.mean([f for _, _, f in per_class]))}
-    if logits.shape[1] == 2:  # report the positive class (delta, switched)
-        prec, rec, f1 = per_class[1]
-        metrics.update(precision=prec, recall=rec, f1=f1, auroc=binary_auroc(logits[:, 1] - logits[:, 0], labels))
-    return metrics
+def make_compute_metrics(pair_ids=None):
+    """compute_metrics for the Trainer; with pair_ids (one per evaluated row, in order) it adds pairwise_acc."""
+    def compute_metrics(eval_pred):
+        logits, labels = eval_pred
+        logits, labels = np.asarray(logits), np.asarray(labels)
+        preds = logits.argmax(-1)
+        per_class = []
+        for c in range(logits.shape[1]):
+            tp = int(((preds == c) & (labels == c)).sum())
+            fp = int(((preds == c) & (labels != c)).sum())
+            fn = int(((preds != c) & (labels == c)).sum())
+            prec = tp / (tp + fp) if (tp + fp) else 0.0
+            rec = tp / (tp + fn) if (tp + fn) else 0.0
+            per_class.append((prec, rec, 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0))
+        metrics = {"accuracy": float((preds == labels).mean()), "macro_f1": float(np.mean([f for _, _, f in per_class]))}
+        if logits.shape[1] == 2:  # report the positive class (delta, switched)
+            prec, rec, f1 = per_class[1]
+            metrics.update(precision=prec, recall=rec, f1=f1, auroc=binary_auroc(logits[:, 1] - logits[:, 0], labels))
+            if pair_ids is not None:
+                metrics["pairwise_acc"] = pairwise_accuracy(logits[:, 1] - logits[:, 0], labels, pair_ids)
+        return metrics
+    return compute_metrics
 
-def pairwise_accuracy(scores, labels, pair_ids):
-    """T1: share of CMV pairs whose delta reply outscores its no-delta reply (ties count half)."""
+def pairwise_accuracy(scores, labels, pair_ids, lengths=None):
+    """T1: share of pairs whose label-1 reply (delta, higher) outscores the other one (ties count half).
+    With lengths (words per row), only the pairs whose label-1 reply is the shorter one count: a model
+    that just prefers longer replies gets those wrong, so it shows what the model reads past length."""
     pairs = defaultdict(dict)
-    for s, l, p in zip(scores, labels, pair_ids):
-        pairs[p][int(l)] = s
-    wins = [float(d[1] > d[0]) + 0.5 * float(d[1] == d[0]) for d in pairs.values() if len(d) == 2]
+    for i, (s, l, p) in enumerate(zip(scores, labels, pair_ids)):
+        pairs[p][int(l)] = (s, lengths[i] if lengths is not None else 0)
+    wins = [float(d[1][0] > d[0][0]) + 0.5 * float(d[1][0] == d[0][0]) for d in pairs.values()
+            if len(d) == 2 and (lengths is None or d[1][1] < d[0][1])]
     return float(np.mean(wins)) if wins else float("nan")
+
+def to_pairs(rows):
+    """Rows of a pairs config (two per pair_id with the same original, labels 1 and 0) -> one example per
+    pair: original, higher (the label-1 reply) and lower. A pair missing a row is left out."""
+    by_pair = defaultdict(dict)
+    for original, reply, label, pair_id in zip(rows["original"], rows["reply"], rows["labels"], rows["pair_id"]):
+        by_pair[pair_id][label] = (original, reply)
+    pairs = [d for d in by_pair.values() if len(d) == 2]
+    return Dataset.from_dict({"original": [d[1][0] for d in pairs], "higher": [d[1][1] for d in pairs],
+                              "lower": [d[0][1] for d in pairs]})
+
+class PairCollator:
+    """Pads a batch of pairs into one batch of sequences: the pairs' higher replies, then their lower ones.
+    Evaluation batches are rows with labels (the Trainer uses one collator for both) and are padded as rows."""
+    def __init__(self, tok):
+        self.tok = tok
+        self.rows = DataCollatorWithPadding(tokenizer=tok)
+
+    def __call__(self, features):
+        if "input_ids_hi" not in features[0]:
+            return self.rows(features)
+        rows = [{"input_ids": p[f"input_ids_{side}"], "attention_mask": p[f"attention_mask_{side}"]}
+                for side in ("hi", "lo") for p in features]
+        return self.tok.pad(rows, return_tensors="pt")
+
+class PairwiseTrainer(Trainer):
+    """Trains with a pairwise (Bradley-Terry) loss, -log sigmoid(score(higher) - score(lower)), as reward
+    models are trained: only which reply of a pair scores higher matters, so a reply can win one pair and
+    lose another. A reply's score is logit[1] - logit[0], the score the test ranks by. Evaluation batches
+    are single rows with labels and get plain cross-entropy, so validation and test work as before."""
+    loss_is_scaled_for_ga = False  # the pairwise loss is a per-batch mean: the Trainer divides it by the accumulation steps
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        if "labels" in inputs:  # evaluation rows
+            outputs = model(**{k: v for k, v in inputs.items() if k != "labels"})
+            loss = F.cross_entropy(outputs.logits.float(), inputs["labels"])
+            return (loss, outputs) if return_outputs else loss
+        outputs = model(**inputs)  # PairCollator: the first half are the higher replies, the second half the lower ones
+        score = (outputs.logits[:, 1] - outputs.logits[:, 0]).float()
+        higher, lower = score.chunk(2)
+        loss = -F.logsigmoid(higher - lower).mean()
+        return (loss, outputs) if return_outputs else loss
 
 def weighted_cross_entropy(weights):
     """Class-weighted loss for Trainer(compute_loss_func=...). The Trainer expects such a loss to be
@@ -130,7 +188,8 @@ def main():
     grad_accum = 1   if args.smoke else EFFECTIVE_BATCH // (args.batch_size * n_gpus)
     max_length = 256 if args.smoke else MAX_LENGTH
     save_steps = 2   if args.smoke else SAVE_STEPS
-    print(f"[BATCH] {batch_size} per GPU x {n_gpus} GPUs x {grad_accum} accumulation = {batch_size * n_gpus * grad_accum} rows per step")
+    unit = "pairs" if args.pairwise else "rows"
+    print(f"[BATCH] {batch_size} per GPU x {n_gpus} GPUs x {grad_accum} accumulation = {batch_size * n_gpus * grad_accum} {unit} per step")
 
     ds = load_dataset(DATASET_REPO, args.dataset_config, token=HF_TOKEN).rename_column("label", "labels")
     if args.smoke:
@@ -141,6 +200,11 @@ def main():
     # inverse-frequency weights, averaging 1 over the training set; all 1s for balanced configs
     class_weights = torch.tensor(counts.sum() / (len(label_names) * np.maximum(counts, 1)), dtype=torch.float32)
     print("[CLASSES] " + ", ".join(f"{n}={c} (weight {w:.2f})" for n, c, w in zip(label_names, counts, class_weights.tolist())))
+    has_pairs = "pair_id" in ds["test"].column_names
+    if args.pairwise and (not has_pairs or len(label_names) != 2):
+        raise SystemExit(f"--pairwise needs a config with pair_id and two labels; {args.dataset_config} has neither or more labels")
+    pair_ids = {k: v["pair_id"] if "pair_id" in v.column_names else None for k, v in ds.items()}
+    test_words = [len(reply.split()) for reply in ds["test"]["reply"]]
 
     tok = AutoTokenizer.from_pretrained(MODEL_NAME, token=HF_TOKEN)
     tok.truncation_side = args.truncation_side
@@ -148,7 +212,25 @@ def main():
     def tokenize(batch):
         return tok(batch["original"], batch["reply"], truncation="longest_first", max_length=max_length)
 
+    def tokenize_pairs(batch):
+        higher = tok(batch["original"], batch["higher"], truncation="longest_first", max_length=max_length)
+        lower = tok(batch["original"], batch["lower"], truncation="longest_first", max_length=max_length)
+        return {"input_ids_hi": higher["input_ids"], "attention_mask_hi": higher["attention_mask"],
+                "input_ids_lo": lower["input_ids"], "attention_mask_lo": lower["attention_mask"]}
+
+    if args.pairwise:
+        # training sees whole pairs; validation and test stay rows, scored one by one as in row training
+        train_pairs = to_pairs(ds["train"])
+        print(f"[PAIRWISE] {len(train_pairs)} training pairs from {len(ds['train'])} rows")
+        train_set = train_pairs.map(tokenize_pairs, batched=True, remove_columns=["original", "higher", "lower"])
+        ds = DatasetDict({k: v for k, v in ds.items() if k != "train"})
     ds = ds.map(tokenize, batched=True, remove_columns=["original", "reply"])
+    if args.pairwise:
+        # the Trainer keeps every column (the pairs' columns are not model inputs), so pass only model inputs
+        ds = DatasetDict({k: v.select_columns([c for c in ("input_ids", "attention_mask", "labels") if c in v.column_names])
+                          for k, v in ds.items()})
+    else:
+        train_set = ds["train"]
 
     # With --init-model the encoder and, when the label count matches, the classifier head carry over; the
     # head's class 1 then keeps its meaning (cmv_vote_pairs "higher" -> cmv "delta"). Otherwise the head is new.
@@ -193,7 +275,9 @@ def main():
         load_best_model_at_end=not args.smoke,
         # AUROC ranks without a threshold; positive-class F1 rewards predicting that class often,
         # so on balanced cmv it preferred checkpoints that call most replies "delta"
-        metric_for_best_model="auroc" if len(label_names) == 2 else "macro_f1",
+        metric_for_best_model="pairwise_acc" if args.pairwise else "auroc" if len(label_names) == 2 else "macro_f1",
+        remove_unused_columns=not args.pairwise,
+        gradient_checkpointing=args.gradient_checkpointing,
         report_to="none",
         push_to_hub=args.push and not args.smoke,
         hub_model_id=model_repo,
@@ -202,16 +286,18 @@ def main():
         # with the model; the Hub client reads HF_TOKEN from the environment instead
     )
 
-    trainer = Trainer(
-        model=model, args=targs,
-        train_dataset=ds["train"], eval_dataset=ds["validation"],
-        data_collator=collator, compute_metrics=compute_metrics,
-        compute_loss_func=weighted_cross_entropy(class_weights),
+    common = dict(
+        model=model, args=targs, train_dataset=train_set, eval_dataset=ds["validation"],
+        compute_metrics=make_compute_metrics(pair_ids["validation"]),
         # the best validation checkpoint is loaded at the end either way; this also stops training once
         # validation stops improving (smoke runs skip it: they keep no best checkpoint)
         callbacks=[EarlyStoppingCallback(early_stopping_patience=args.early_stopping)]
                   if args.early_stopping and not args.smoke else None,
     )
+    if args.pairwise:  # pairs are balanced by construction, so no class weights
+        trainer = PairwiseTrainer(data_collator=PairCollator(tok), **common)
+    else:
+        trainer = Trainer(data_collator=collator, compute_loss_func=weighted_cross_entropy(class_weights), **common)
 
     # Continue a run cut off by a time limit; delete outputs/<run> to start over.
     resume = None if args.smoke else last_complete_checkpoint(outputdir)
@@ -223,9 +309,11 @@ def main():
 
     pred = trainer.predict(ds["test"])
     metrics = {k[5:]: v for k, v in pred.metrics.items() if k.startswith("test_")}
-    if "pair_id" in ds["test"].column_names:
+    if has_pairs:
         scores = pred.predictions[:, 1] - pred.predictions[:, 0]
-        metrics["pairwise_acc"] = pairwise_accuracy(scores, pred.label_ids, ds["test"]["pair_id"])
+        metrics["pairwise_acc"] = pairwise_accuracy(scores, pred.label_ids, pair_ids["test"])
+        # pairs whose label-1 reply is the shorter one: below 0.5 means the model mostly ranks by length
+        metrics["pairwise_acc_shorter_won"] = pairwise_accuracy(scores, pred.label_ids, pair_ids["test"], test_words)
     print("\n=== TEST METRICS ===")
     for name, v in metrics.items():
         print(f"  {name:10s}: {v:.4f}" if isinstance(v, float) else f"  {name}: {v}")
