@@ -1,0 +1,99 @@
+#!/bin/bash
+# FILENAME: scholar.sub
+# Slurm job for fine-tuning on Purdue's Scholar cluster: both A40s on one node, one training
+# process per GPU via torchrun. Submit from the repo root, with HF_TOKEN exported:
+#   sbatch jobs/scholar.sub cmv
+#   sbatch jobs/scholar.sub ddo_switch --push
+#   sbatch jobs/scholar.sub cmv_thread --truncation-side left --bf16
+#   sbatch -t 00:30:00 jobs/scholar.sub cmv --smoke        # quick pipeline check
+# Everything after the config name is passed through to scripts/train_delta.py.
+# Scholar's normal QoS caps a job at 4h, so longer runs are chained (see below).
+# Each GPU gets BATCH_PER_GPU rows per forward pass (an A40 has 48 GB, against the 80 GB A100 that
+# train_delta.py's default of 4 is sized for); train_delta.py picks the gradient accumulation that
+# keeps 32 rows per optimizer step: 1 x 2 GPUs x 16 here. Pass --batch-size to override.
+#
+# One-time setup on a login node:
+#   module load conda
+#   export CONDA_PKGS_DIRS=$RCAC_SCRATCH/conda_pkgs PIP_CACHE_DIR=$RCAC_SCRATCH/pip_cache
+#   conda create -y -p $RCAC_SCRATCH/persuasion-env python=3.12
+#   $RCAC_SCRATCH/persuasion-env/bin/pip install -r requirements.txt
+#
+# Runs longer than one job: queue several parts up front. Each waits for the previous one
+# to end (afterany, since a time-limit kill counts as a failure), resumes from its last
+# checkpoint, and parts left over after training finishes exit immediately:
+#   jid=$(sbatch --parsable jobs/scholar.sub ddo_switch)
+#   for i in 1 2 3; do jid=$(sbatch --parsable --dependency=afterany:$jid jobs/scholar.sub ddo_switch); done
+# If a part crashes, the remaining parts exit immediately too; fix the cause, delete
+# outputs/<run>/FAILED, and resubmit. To start a run over, delete outputs/<run>/. <run> is the
+# config name, or <config>-from-<model> for a run started from another model:
+#   sbatch jobs/scholar.sub cmv_vote_pairs --bf16 --push
+#   sbatch jobs/scholar.sub cmv --bf16 --init-model nlp-final-project11/nlp-project-modernbert-cmv_vote_pairs
+#   (outputs/cmv-from-cmv_vote_pairs/)
+#SBATCH --job-name=persuasion
+#SBATCH -A scholar
+#SBATCH --partition=gpu
+#SBATCH --qos=normal
+#SBATCH --time=04:00:00
+#SBATCH --nodes=1
+#SBATCH --gpus-per-node=2
+#SBATCH --constraint=a40
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --output=%x-%j.out
+
+set -euo pipefail
+NGPUS=2          # keep equal to --gpus-per-node above
+BATCH_PER_GPU=1  # with NGPUS, must divide 32
+
+CONFIG=${1:-cmv}
+shift || true
+PY=$RCAC_SCRATCH/persuasion-env/bin/python
+
+# Markers for chained parts; smoke runs never set or check them.
+#   DONE:   a full run finished, so later parts have nothing to do.
+#   FAILED: a part crashed, so later parts would fail the same way while holding a GPU.
+# A time-limit kill or scancel ends this script outright, so it sets neither.
+# They live in the run's output folder, which train_delta.py names: outputs/<config>, or
+# outputs/<config>-from-<model> with --init-model.
+RUN_DIR=$("$PY" scripts/train_delta.py --dataset-config "$CONFIG" "$@" --print-output-dir | tail -n 1)
+DONE=$RUN_DIR/DONE
+FAILED=$RUN_DIR/FAILED
+SMOKE=false
+if [[ " $* " == *" --smoke "* ]]; then
+    SMOKE=true
+fi
+
+if ! $SMOKE && [[ -f $DONE ]]; then
+    echo "$RUN_DIR already finished ($DONE exists); nothing to do."
+    exit 0
+fi
+
+if ! $SMOKE && [[ -f $FAILED ]]; then
+    echo "An earlier part of this run crashed ($FAILED exists); see its log, fix the cause, delete $FAILED, and resubmit."
+    exit 1
+fi
+
+# The dataset and model repos are private; train_delta.py and the Hub client read HF_TOKEN
+# from the environment, so stop here rather than fail partway through.
+: "${HF_TOKEN:?export HF_TOKEN in your shell before running sbatch}"
+# Home is capped at 25GB, so the env and HF cache live on scratch
+# (run from a clone on scratch too, since checkpoints land in ./outputs/).
+export HF_HOME=$RCAC_SCRATCH/hf_cache
+nvidia-smi
+# Stop rather than hold a GPU while training on CPU (RCAC tracks per-job GPU utilization).
+# torch.distributed.run (torchrun) starts one copy of the script per GPU; the Trainer splits
+# each step's data across them and averages their gradients.
+if ! "$PY" -c "import sys, torch; sys.exit(0 if torch.cuda.is_available() else 'torch cannot use the GPU')" \
+    || ! "$PY" -m torch.distributed.run --standalone --nproc_per_node="$NGPUS" \
+           scripts/train_delta.py --dataset-config "$CONFIG" --batch-size "$BATCH_PER_GPU" "$@"; then
+    if ! $SMOKE; then
+        mkdir -p "$(dirname "$FAILED")"
+        touch "$FAILED"
+    fi
+    exit 1
+fi
+
+if ! $SMOKE; then
+    mkdir -p "$(dirname "$DONE")"
+    touch "$DONE"
+fi

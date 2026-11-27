@@ -19,7 +19,11 @@
 #   jid=$(sbatch --parsable -A <account> jobs/train.sub ddo_switch)
 #   for i in 1 2 3; do jid=$(sbatch --parsable -A <account> --dependency=afterany:$jid jobs/train.sub ddo_switch); done
 # If a part crashes, the remaining parts exit immediately too; fix the cause, delete
-# outputs/<config>/FAILED, and resubmit. To start a config over, delete outputs/<config>/.
+# outputs/<run>/FAILED, and resubmit. To start a run over, delete outputs/<run>/. <run> is the
+# config name, or <config>-from-<model> for a run started from another model:
+#   sbatch -A <account> jobs/train.sub cmv_vote_pairs --bf16 --push
+#   sbatch -A <account> jobs/train.sub cmv --bf16 --init-model nlp-final-project11/nlp-project-modernbert-cmv_vote_pairs
+#   (outputs/cmv-from-cmv_vote_pairs/)
 #SBATCH --job-name=persuasion
 #SBATCH --partition=a100-80gb
 #SBATCH --qos=standby
@@ -34,13 +38,17 @@ set -euo pipefail
 
 CONFIG=${1:-cmv}
 shift || true
+PY=$RCAC_SCRATCH/persuasion-env/bin/python
 
 # Markers for chained parts; smoke runs never set or check them.
 #   DONE:   a full run finished, so later parts have nothing to do.
 #   FAILED: a part crashed, so later parts would fail the same way while holding a GPU.
 # A time-limit kill or scancel ends this script outright, so it sets neither.
-DONE=outputs/$CONFIG/DONE
-FAILED=outputs/$CONFIG/FAILED
+# They live in the run's output folder, which train_delta.py names: outputs/<config>, or
+# outputs/<config>-from-<model> with --init-model.
+RUN_DIR=$("$PY" scripts/train_delta.py --dataset-config "$CONFIG" "$@" --print-output-dir | tail -n 1)
+DONE=$RUN_DIR/DONE
+FAILED=$RUN_DIR/FAILED
 SMOKE=false
 if [[ " $* " == *" --smoke "* ]]; then
     SMOKE=true
@@ -60,7 +68,6 @@ fi
 # Home is capped at 25GB, so the env and HF cache live on scratch
 # (run from a clone on scratch too, since checkpoints land in ./outputs/).
 export HF_HOME=$RCAC_SCRATCH/hf_cache
-PY=$RCAC_SCRATCH/persuasion-env/bin/python
 
 nvidia-smi
 # Stop rather than hold a GPU while training on CPU (RCAC tracks per-job GPU utilization).

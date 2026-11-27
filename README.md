@@ -61,10 +61,26 @@ python scripts/train_delta.py --smoke
 
 # CMV thread outcome: keep the end of an over-long discussion instead of its start
 python scripts/train_delta.py --dataset-config cmv_thread --truncation-side left --bf16
+
+# T1 with vote pairs as extra training: train on cmv_vote_pairs, then fine-tune that model on cmv
+python scripts/train_delta.py --dataset-config cmv_vote_pairs --bf16 --push
+python scripts/train_delta.py --dataset-config cmv --bf16 --init-model nlp-final-project11/nlp-project-modernbert-cmv_vote_pairs
+
+# the same with every vote pair (about 450,000 training pairs; one epoch is 3.7x the rows of 3 epochs above)
+python scripts/train_delta.py --dataset-config cmv_vote_pairs_all --bf16 --epochs 1 --push
+python scripts/train_delta.py --dataset-config cmv --bf16 --init-model nlp-final-project11/nlp-project-modernbert-cmv_vote_pairs_all
 ```
 
-Data is loaded from the `t1-t2` branch by default; `--dataset-revision main`
-loads the shared branch instead.
+`--init-model` starts from a fine-tuned model (a Hub repo or a local folder) instead of
+ModernBERT-base. The run is named `<config>-from-<model>` (here `cmv-from-cmv_vote_pairs`), for its
+folder in `outputs/` and its Hub repo, so it never resumes from or overwrites the plain `cmv` run.
+When both configs have two labels, the classifier head carries over with its class 1
+(`higher` becomes `delta`); otherwise a new head is trained. Compare it with a plain `cmv` run
+trained with the same flags.
+
+Data is loaded from the dataset repo's `main` branch. Its `cmv` config has a different split from
+the `t1-t2` branch's `cmv`, which the first T1 run in `RESULTS.md` used: only 56 of the 578 `t1-t2`
+test posts are `main` test posts, so that run's 66.1% is not comparable with runs on `main`.
 
 Inputs are cut to 8,192 tokens, the most ModernBERT reads. `cmv_thread` (a post and its whole
 discussion up to the OP's first award attempt) has long inputs: 23% of the threads exceed that.
@@ -85,6 +101,11 @@ Clone the repo onto scratch, then create the environment at `$RCAC_SCRATCH/persu
 with the `conda` module, as RCAC recommends; the commands are in the header of `jobs/train.sub`.
 That header also shows how to submit, and how to chain several 4-hour standby jobs into
 one longer run.
+
+On Scholar, use `jobs/scholar.sub` the same way (`sbatch jobs/scholar.sub cmv`, no `-A`). It trains
+on both A40s of a node with `torchrun`, one row per GPU per forward pass; `train_delta.py` sets the
+gradient accumulation so every optimizer step still covers 32 rows (`--batch-size` changes the rows
+per GPU).
 
 Rules worth knowing (RCAC policies): run everything heavier than setup through `sbatch`,
 since busy processes on login nodes are killed automatically. Never put tokens in scripts,

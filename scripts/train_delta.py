@@ -17,10 +17,10 @@ from transformers import (
 
 DATASET_REPO = "nlp-final-project11/persuasion-datasets"
 MODEL_NAME = "answerdotai/ModernBERT-base" 
-MODEL_REPO = "nlp-final-project11/nlp-project-modernbert"  # pushed to {MODEL_REPO}-{config}
+MODEL_REPO = "nlp-final-project11/nlp-project-modernbert"  # pushed to {MODEL_REPO}-{run_name}
 MAX_LENGTH = 8192  # the most ModernBERT reads
-BATCH_SIZE = 4
-GRAD_ACCUM = 8
+EFFECTIVE_BATCH = 32  # rows per optimizer step over all GPUs; gradient accumulation makes up the rest
+BATCH_SIZE = 4  # default rows per GPU per forward pass (--batch-size), sized for an 80 GB A100 at 8,192 tokens
 EPOCHS = 3
 LR = 2e-5
 SAVE_STEPS = 500  # eval + checkpoint interval; bounds the work lost when a job hits its time limit
@@ -33,11 +33,29 @@ def parse_args():
     ap.add_argument("--truncation-side", choices=("right", "left"), default="right",
                     help="which end of an over-long text is cut; left keeps the end of the reply, "
                          "i.e. the latest comments of a cmv_thread discussion (default: %(default)s)")
-    ap.add_argument("--push", action="store_true", help=f"push the model to a private repo, {MODEL_REPO}-<config>")
+    ap.add_argument("--push", action="store_true", help=f"push the model to a private repo, {MODEL_REPO}-<run> (<config>, or <config>-from-<model>)")
     ap.add_argument("--smoke", action="store_true", help="tiny/fast pipeline check")
     ap.add_argument("--bf16", action="store_true", help="train with bf16 mixed precision (default: fp32, as the T1 baseline)")
     ap.add_argument("--freeze", action="store_true", help="freeze the encoder, train only the classifier head (cheap, lower accuracy)")
+    ap.add_argument("--batch-size", type=int, default=BATCH_SIZE,
+                    help=f"rows per GPU per forward pass; gradient accumulation keeps {EFFECTIVE_BATCH} rows per "
+                         "optimizer step for any batch size and GPU count (default: %(default)s)")
+    ap.add_argument("--epochs", type=float, default=EPOCHS, help="passes over the training split (default: %(default)s)")
+    ap.add_argument("--init-model", default=None,
+                    help="start from this fine-tuned model (Hub repo or local folder) instead of ModernBERT-base, "
+                         "e.g. nlp-final-project11/nlp-project-modernbert-cmv_vote_pairs; the run is named "
+                         "<config>-from-<model> for its output folder and Hub repo")
+    ap.add_argument("--print-output-dir", action="store_true",
+                    help="print the run's output folder and exit (jobs/train.sub keeps its DONE/FAILED markers there)")
     return ap.parse_args()
+
+def run_name(args):
+    """<config>, or <config>-from-<model> when starting from --init-model, so such a run never resumes from
+    or overwrites the plain run of the same config (locally or on the Hub)."""
+    if not args.init_model:
+        return args.dataset_config
+    model = os.path.basename(args.init_model.rstrip("/")).removeprefix(MODEL_REPO.split("/")[1] + "-")
+    return f"{args.dataset_config}-from-{model}"
 
 def binary_auroc(scores, labels):
     """Chance a random positive outscores a random negative (ties count half); nan if a class is absent."""
@@ -95,12 +113,19 @@ def last_complete_checkpoint(outputdir):
 
 def main():
     args = parse_args()
-    epochs     = 1   if args.smoke else EPOCHS
+    if args.print_output_dir:
+        print(f"outputs/{run_name(args)}")
+        return
+    n_gpus = int(os.environ.get("WORLD_SIZE", 1))  # set by torchrun, one process per GPU
+    if not args.smoke and EFFECTIVE_BATCH % (args.batch_size * n_gpus):
+        raise SystemExit(f"--batch-size {args.batch_size} x {n_gpus} GPUs does not divide {EFFECTIVE_BATCH}")
+    epochs     = 1   if args.smoke else args.epochs
     max_steps  = 4   if args.smoke else -1
-    batch_size = 1   if args.smoke else BATCH_SIZE
-    grad_accum = 1   if args.smoke else GRAD_ACCUM
+    batch_size = 1   if args.smoke else args.batch_size
+    grad_accum = 1   if args.smoke else EFFECTIVE_BATCH // (args.batch_size * n_gpus)
     max_length = 256 if args.smoke else MAX_LENGTH
     save_steps = 2   if args.smoke else SAVE_STEPS
+    print(f"[BATCH] {batch_size} per GPU x {n_gpus} GPUs x {grad_accum} accumulation = {batch_size * n_gpus * grad_accum} rows per step")
 
     ds = load_dataset(DATASET_REPO, args.dataset_config, token=HF_TOKEN).rename_column("label", "labels")
     if args.smoke:
@@ -120,12 +145,17 @@ def main():
 
     ds = ds.map(tokenize, batched=True, remove_columns=["original", "reply"])
 
+    # With --init-model the encoder and, when the label count matches, the classifier head carry over; the
+    # head's class 1 then keeps its meaning (cmv_vote_pairs "higher" -> cmv "delta"). Otherwise the head is new.
     model = AutoModelForSequenceClassification.from_pretrained(
-        MODEL_NAME, num_labels=len(label_names),
+        args.init_model or MODEL_NAME, num_labels=len(label_names),
         id2label=dict(enumerate(label_names)),
         label2id={n: i for i, n in enumerate(label_names)},
+        ignore_mismatched_sizes=bool(args.init_model),
         token=HF_TOKEN,
     )
+    if args.init_model:
+        print(f"[INIT] starting from {args.init_model}")
 
     if args.freeze:
         for p in model.base_model.parameters():
@@ -138,8 +168,8 @@ def main():
         print("[PRECISION] --bf16 requested but this GPU does not support it; using fp32")
     print(f"[PRECISION] {'bf16 mixed precision' if use_bf16 else 'fp32'}")
     # smoke runs get their own dir so a real run never resumes from a smoke checkpoint
-    outputdir = f"outputs/{args.dataset_config}" + ("-smoke" if args.smoke else "")
-    model_repo = f"{MODEL_REPO}-{args.dataset_config}"
+    outputdir = f"outputs/{run_name(args)}" + ("-smoke" if args.smoke else "")
+    model_repo = f"{MODEL_REPO}-{run_name(args)}"
     targs = TrainingArguments(
         output_dir=outputdir,
         per_device_train_batch_size=batch_size,
@@ -174,7 +204,7 @@ def main():
         compute_loss_func=weighted_cross_entropy(class_weights),
     )
 
-    # Continue a run cut off by a time limit; delete outputs/<config> to start over.
+    # Continue a run cut off by a time limit; delete outputs/<run> to start over.
     resume = None if args.smoke else last_complete_checkpoint(outputdir)
     if resume:
         print(f"[RESUME] continuing from {resume}")
