@@ -66,7 +66,7 @@ python scripts/train_delta.py --dataset-config cmv_thread --truncation-side left
 python scripts/train_delta.py --dataset-config cmv_vote_pairs --bf16 --early-stopping 5 --push
 python scripts/train_delta.py --dataset-config cmv --bf16 --init-model nlp-final-project11/nlp-project-modernbert-cmv_vote_pairs
 
-# the same with vote pairs at every depth of a thread plus delta-vs-well-voted pairs (234,574 training rows instead of 81,432)
+# the same with vote pairs at every depth of a thread plus delta-vs-well-voted pairs (222,414 training rows instead of 81,432)
 python scripts/train_delta.py --dataset-config cmv_vote_pairs_all --bf16 --early-stopping 5 --push
 python scripts/train_delta.py --dataset-config cmv --bf16 --init-model nlp-final-project11/nlp-project-modernbert-cmv_vote_pairs_all
 ```
