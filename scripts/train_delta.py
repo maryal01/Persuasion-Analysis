@@ -1,6 +1,7 @@
 import argparse
 import glob
 import os
+import shutil
 from collections import defaultdict
 
 import numpy as np
@@ -187,7 +188,7 @@ def main():
         eval_steps=save_steps,
         save_strategy="steps",
         save_steps=save_steps,
-        save_total_limit=2,  # the best checkpoint is kept on top of this
+        save_total_limit=1,  # the newest checkpoint, plus the best one when it is older: at most 2 (about 1.8 GB each)
         logging_steps=25,
         load_best_model_at_end=not args.smoke,
         # AUROC ranks without a threshold; positive-class F1 rewards predicting that class often,
@@ -236,6 +237,12 @@ def main():
         trainer.save_model(outputdir)
         tok.save_pretrained(outputdir)
         print(f"\nSaved model locally -> {outputdir}/  (add --push to upload)")
+    # The final (best) model is now in outputdir itself, and on the Hub with --push; the checkpoints
+    # were only for resuming, so free their space (one GPU process deletes them)
+    if not args.smoke and trainer.is_world_process_zero():
+        for checkpoint in glob.glob(os.path.join(outputdir, "checkpoint-*")):
+            shutil.rmtree(checkpoint)
+        print(f"[CLEANUP] deleted the checkpoints in {outputdir}/")
 
 if __name__ == "__main__":
     main()

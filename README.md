@@ -99,7 +99,8 @@ metrics include AUROC for binary configs and, for `cmv`, pairwise accuracy: the
 share of pairs whose delta reply scores higher than its no-delta reply.
 
 Runs save a checkpoint every 500 steps and resume from the newest one in
-`outputs/<config>/`; delete that directory to start over.
+`outputs/<run>/`; delete that directory to start over. At most two checkpoints are kept (the newest
+and the best, about 1.8 GB each), and a finished run deletes them, keeping only its final model.
 
 ## 3. Train on Gilbreth — `jobs/train.sub`
 Clone the repo onto scratch, then create the environment at `$RCAC_SCRATCH/persuasion-env`
